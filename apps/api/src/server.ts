@@ -1,0 +1,40 @@
+import Fastify from 'fastify';
+import cors from '@fastify/cors';
+import { randomUUID } from 'node:crypto';
+import { bling, fidelizei } from './integrations/demo.js';
+import { money, type Sale, type SaleItem } from './domain.js';
+
+const app = Fastify({ logger: true });
+await app.register(cors, { origin: true });
+const sales = new Map<string, Sale>();
+const badRequest = (message: string): never => { throw Object.assign(new Error(message), { statusCode: 400 }); };
+const calculate = (items: SaleItem[], discount = 0) => { const subtotal = money(items.reduce((n, i) => n + i.quantity * i.unitPrice, 0)); return { subtotal, discount, total: money(Math.max(0, subtotal - discount)) }; };
+
+app.get('/health', async () => ({ ok: true }));
+app.get('/catalog/products', async () => bling.products());
+app.get('/catalog/sellers', async () => bling.sellers());
+app.get('/customers/:cpf', async (req) => fidelizei.findCustomer((req.params as { cpf: string }).cpf));
+app.post('/sales', async (req) => {
+  const body = req.body as { operatorId: string; sellerId: string; items: SaleItem[]; customerCpf?: string };
+  if (!body.operatorId || !body.sellerId || !body.items?.length) return badRequest('Operador, vendedor e itens são obrigatórios');
+  const customer = body.customerCpf ? await fidelizei.findCustomer(body.customerCpf) : undefined;
+  const amounts = calculate(body.items);
+  const sale: Sale = { id: randomUUID(), status: 'OPEN', operatorId: body.operatorId, sellerId: body.sellerId, customer, items: body.items, ...amounts, createdAt: new Date().toISOString() };
+  sales.set(sale.id, sale); return sale;
+});
+app.post('/sales/:id/coupon', async (req) => {
+  const sale = sales.get((req.params as { id: string }).id); const { code } = req.body as { code: string };
+  if (!sale || !sale.customer) return badRequest('Venda ou cliente não encontrado');
+  const reservation = await fidelizei.validateAndReserve(code, sale.customer.id, sale.subtotal);
+  Object.assign(sale, { coupon: reservation.coupon, reservationId: reservation.reservationId, ...calculate(sale.items, reservation.coupon.discount) }); return sale;
+});
+app.post('/sales/:id/complete', async (req) => {
+  const sale = sales.get((req.params as { id: string }).id); const { paymentMethod } = req.body as { paymentMethod: string };
+  if (!sale || sale.status !== 'OPEN') return badRequest('Venda indisponível para conclusão');
+  const order = await bling.createOrder({ customerId: sale.customer?.id, sellerId: sale.sellerId, items: sale.items, discount: sale.discount, paymentMethod, idempotencyKey: sale.id });
+  try { const tx = sale.reservationId ? await fidelizei.consumeReservation(sale.reservationId, sale.id) : undefined; Object.assign(sale, { status: 'COMPLETED', blingOrderId: order.id, fidelizeiTransactionId: tx?.transactionId }); }
+  catch { Object.assign(sale, { status: 'RECONCILIATION_REQUIRED', blingOrderId: order.id }); }
+  return sale;
+});
+app.post('/webhooks/:provider', async (req) => ({ accepted: true, provider: (req.params as { provider: string }).provider, idempotency: req.headers['x-event-id'] ?? randomUUID() }));
+await app.listen({ port: Number(process.env.PORT ?? 3333), host: '0.0.0.0' });
