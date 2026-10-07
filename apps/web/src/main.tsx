@@ -80,11 +80,9 @@ function App() {
       window.history.replaceState({}, '', window.location.pathname);
     }
     Promise.all([
-      load<Product[]>('/catalog/products'),
       load<Seller[]>('/catalog/sellers'),
       load<PaymentMethod[]>('/catalog/payment-methods')
-    ]).then(([p, s, methods]) => {
-      setProducts(p);
+    ]).then(([s, methods]) => {
       setSellers(s);
       setPaymentMethods(methods);
       setSeller(s[0]?.id ?? '');
@@ -118,6 +116,10 @@ function App() {
 
   const searchCatalog = async () => {
     const term = query.trim();
+    if (!term) {
+      setMessage('Digite o nome, SKU ou código de barras do produto.');
+      return;
+    }
     setSearchingCatalog(true);
     setMessage('');
     try {
@@ -230,7 +232,7 @@ function App() {
     <section className="workspace">
       <article className="panel">
         {step === 'product' && <>
-          <div className="section-title"><div><small>ETAPA 1</small><h2>Adicionar produtos</h2></div><span>{products.length} itens sincronizados</span></div>
+          <div className="section-title"><div><small>ETAPA 1</small><h2>Adicionar produtos</h2></div><span>Busca direta no Bling</span></div>
           <div className="catalog-search">
             <input className="search" value={query} onChange={e => { setQuery(e.target.value); setCatalogSearchActive(false); }} onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); void searchCatalog(); } }} placeholder="Bipe o código de barras ou pesquise SKU / produto" autoFocus />
             <button className="search-action" onClick={() => void searchCatalog()} disabled={searchingCatalog}>{searchingCatalog ? 'Buscando…' : 'Buscar'}</button>
@@ -239,6 +241,9 @@ function App() {
           <div className="catalog">{filtered.map(p => <button className="product" disabled={!p.stock} onClick={() => add(p)} key={p.id}>
             <span><b>{p.name}</b><small>{p.sku}{p.barcode ? ` · ${p.barcode}` : ''} · {p.stock} em estoque</small></span><strong>{brl.format(p.price)}</strong>
           </button>)}</div>
+          {catalogSearchActive && <div className="catalog-result-count">{products.length} produto(s) encontrado(s)</div>}
+          {!catalogSearchActive && <div className="empty-state product-empty">Pesquise um produto para começar. O catálogo completo não é carregado no caixa.</div>}
+          {catalogSearchActive && !filtered.length && <div className="empty-state product-empty">Nenhum produto encontrado para essa busca.</div>}
           <button className="next" disabled={!items.length} onClick={() => setStep('customer')}>Continuar para cliente</button>
         </>}
 
