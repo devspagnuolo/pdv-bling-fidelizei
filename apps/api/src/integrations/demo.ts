@@ -6,6 +6,7 @@ import type {
   SaleItem,
   Seller
 } from '../domain.js';
+import { getBlingAccessToken } from './credentials.js';
 
 const products: Product[] = [
   { id: 'bling-prod-1', sku: 'VEST-001', name: 'Vestido Midi', price: 199.9, stock: 8 },
@@ -79,7 +80,7 @@ const normalizePaymentMethod = (raw: Record<string, unknown>): PaymentMethod | u
   };
 };
 const fetchPaymentMethods = async (): Promise<PaymentMethod[]> => {
-  const accessToken = process.env.BLING_ACCESS_TOKEN;
+  const accessToken = await getBlingAccessToken();
   if (!accessToken) return demoPaymentMethods;
   if (paymentMethodCache && paymentMethodCache.expiresAt > Date.now()) return paymentMethodCache.data;
 
@@ -105,7 +106,7 @@ const fetchPaymentMethods = async (): Promise<PaymentMethod[]> => {
 };
 const findBlingCustomer = async (cpf: string): Promise<BlingCustomer | undefined> => {
   const normalizedCpf = cpf.replace(/\D/g, '');
-  const accessToken = process.env.BLING_ACCESS_TOKEN;
+  const accessToken = await getBlingAccessToken();
   if (!accessToken) return demoBlingCustomers.find(customer => customer.cpf === normalizedCpf);
 
   const url = new URL(`${BLING_API_URL}/contatos`);
