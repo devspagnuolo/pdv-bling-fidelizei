@@ -13,6 +13,25 @@ type PaymentMethod = {
   isDefault?: boolean;
   source: 'BLING' | 'DEMO';
 };
+type CustomerLookup = {
+  found: boolean;
+  cpf: string;
+  name?: string;
+  bling?: { id: string; cpf: string; name: string; email?: string; phone?: string };
+  fidelizei?: {
+    id: string;
+    cpf: string;
+    name: string;
+    tier: string;
+    points: number;
+    benefits: string[];
+    coupons: { id: string; code: string; description: string; discount: number }[];
+  };
+  systems: {
+    bling: 'FOUND' | 'NOT_FOUND' | 'UNAVAILABLE';
+    fidelizei: 'FOUND' | 'NOT_FOUND' | 'UNAVAILABLE';
+  };
+};
 type Item = Product & { quantity: number };
 type Step = 'product' | 'customer' | 'payment';
 const brl = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' });
@@ -36,7 +55,7 @@ function App() {
   const [query, setQuery] = useState('');
   const [seller, setSeller] = useState('');
   const [cpf, setCpf] = useState('');
-  const [customer, setCustomer] = useState<any>();
+  const [customer, setCustomer] = useState<CustomerLookup>();
   const [coupon, setCoupon] = useState('');
   const [sale, setSale] = useState<any>();
   const [paymentMethodId, setPaymentMethodId] = useState('');
@@ -66,6 +85,7 @@ function App() {
   const filtered = products.filter(p => `${p.name} ${p.sku}`.toLowerCase().includes(query.toLowerCase()));
   const selectedPaymentMethod = paymentMethods.find(method => method.id === paymentMethodId);
   const paymentSource = paymentMethods[0]?.source;
+  const loyaltyCustomer = customer?.fidelizei;
 
   const changeCart = (next: Item[]) => {
     setItems(next);
@@ -84,10 +104,20 @@ function App() {
 
   const lookup = async () => {
     setMessage('');
+    setCustomer(undefined);
     const r = await fetch(`${api}/customers/${cpf}`);
     const data = await r.json().catch(() => undefined);
+    if (!r.ok) return setMessage(data?.message ?? 'Não foi possível consultar o cliente.');
     setCustomer(data);
-    setMessage(data ? '' : 'Cliente não localizado no Fidelizei.');
+    if (!data.found) {
+      const unavailable = Object.values(data.systems).includes('UNAVAILABLE');
+      return setMessage(unavailable
+        ? 'Cliente não localizado nas bases disponíveis. Uma integração está temporariamente indisponível.'
+        : 'Cliente não localizado no Bling nem no Fidelizei.');
+    }
+    if (data.bling && data.fidelizei) return setMessage('Cliente localizado no Bling e no Fidelizei.');
+    if (data.bling) return setMessage('Cliente localizado no Bling. Ainda não possui cadastro no Fidelizei.');
+    setMessage('Cliente localizado no Fidelizei. Ainda não possui cadastro no Bling.');
   };
   const create = async () => {
     const r = await fetch(`${api}/sales`, {
@@ -164,14 +194,35 @@ function App() {
         </>}
 
         {step === 'customer' && <>
-          <div className="section-title"><div><small>ETAPA 2</small><h2>Identificar cliente</h2></div><span>Fidelizei</span></div>
-          <label>CPF<div className="row"><input value={cpf} onChange={e => { setCpf(e.target.value); setCustomer(undefined); setSale(undefined); }} placeholder="000.000.000-00" /><button onClick={lookup}>Consultar</button></div></label>
-          {customer ? <div className="customer-card">
-            <div><span className="vip">VIP {customer.tier}</span><h3>{customer.name}</h3><p>{customer.points} pontos disponíveis</p></div>
-            <div><b>Benefícios</b>{customer.benefits.map((benefit: string) => <span key={benefit}>✓ {benefit}</span>)}</div>
-          </div> : <div className="empty-state">Informe o CPF para consultar nível, pontos, benefícios e cupons.</div>}
-          <label>Cupom Fidelizei<div className="row"><input value={coupon} onChange={e => setCoupon(e.target.value.toUpperCase())} placeholder="Digite o código do cupom" /><button disabled={!customer || !coupon} onClick={applyCoupon}>Validar</button></div></label>
-          <div className="nav-actions"><button className="secondary" onClick={() => setStep('product')}>Voltar</button><button className="next" disabled={!customer} onClick={() => setStep('payment')}>Continuar para pagamento</button></div>
+          <div className="section-title"><div><small>ETAPA 2</small><h2>Identificar cliente</h2></div><span>Bling + Fidelizei</span></div>
+          <label>CPF<div className="row"><input value={cpf} onChange={e => { setCpf(e.target.value); setCustomer(undefined); setSale(undefined); setMessage(''); }} placeholder="000.000.000-00" /><button onClick={lookup}>Consultar</button></div></label>
+          {customer?.found ? <div className="customer-card unified">
+            <div className="customer-identity">
+              <div className="source-badges">
+                <span className={customer.systems.bling === 'FOUND' ? 'source-status found' : customer.systems.bling === 'UNAVAILABLE' ? 'source-status unavailable' : 'source-status missing'}>
+                  {customer.systems.bling === 'FOUND' ? '✓ Bling' : customer.systems.bling === 'UNAVAILABLE' ? '! Bling indisponível' : '– Não está no Bling'}
+                </span>
+                <span className={customer.systems.fidelizei === 'FOUND' ? 'source-status found' : customer.systems.fidelizei === 'UNAVAILABLE' ? 'source-status unavailable' : 'source-status missing'}>
+                  {customer.systems.fidelizei === 'FOUND' ? '✓ Fidelizei' : customer.systems.fidelizei === 'UNAVAILABLE' ? '! Fidelizei indisponível' : '– Não está no Fidelizei'}
+                </span>
+              </div>
+              <h3>{customer.name}</h3>
+              <p>CPF {customer.cpf}</p>
+              {customer.bling?.email && <small>{customer.bling.email}</small>}
+            </div>
+            <div className="loyalty-panel">
+              {loyaltyCustomer ? <>
+                <span className="vip">VIP {loyaltyCustomer.tier}</span>
+                <b>{loyaltyCustomer.points} pontos disponíveis</b>
+                <div className="benefits">{loyaltyCustomer.benefits.map(benefit => <span key={benefit}>✓ {benefit}</span>)}</div>
+              </> : <>
+                <b>Sem cadastro de fidelidade</b>
+                <p>A venda pode continuar normalmente. Pontos, benefícios e cupons não serão aplicados.</p>
+              </>}
+            </div>
+          </div> : <div className="empty-state">Informe o CPF para consultar simultaneamente o Bling e o Fidelizei.</div>}
+          <label>Cupom Fidelizei<div className="row"><input disabled={!loyaltyCustomer} value={coupon} onChange={e => setCoupon(e.target.value.toUpperCase())} placeholder={loyaltyCustomer ? 'Digite o código do cupom' : 'Disponível para clientes Fidelizei'} /><button disabled={!loyaltyCustomer || !coupon} onClick={applyCoupon}>Validar</button></div></label>
+          <div className="nav-actions"><button className="secondary" onClick={() => setStep('product')}>Voltar</button><button className="next" disabled={!customer?.found} onClick={() => setStep('payment')}>Continuar para pagamento</button></div>
         </>}
 
         {step === 'payment' && <>
