@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client';
 import './styles.css';
 
 const api = import.meta.env.VITE_API_URL || 'http://localhost:3333';
-type Product = { id: string; sku: string; name: string; price: number; stock: number };
+type Product = { id: string; sku: string; name: string; price: number; stock: number; barcode?: string };
 type Seller = { id: string; name: string };
 type PaymentMethod = {
   id: string;
