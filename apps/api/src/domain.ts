@@ -1,4 +1,4 @@
-export type Product = { id: string; sku: string; name: string; price: number; stock: number };
+export type Product = { id: string; sku: string; name: string; price: number; stock: number; barcode?: string };
 export type Seller = { id: string; name: string; active: boolean };
 export type PaymentMethod = {
   id: string;
