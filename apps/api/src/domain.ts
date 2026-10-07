@@ -8,8 +8,32 @@ export type PaymentMethod = {
   isDefault?: boolean;
   source: 'BLING' | 'DEMO';
 };
-export type Customer = { id: string; cpf: string; name: string; tier: string; points: number; benefits: string[]; coupons: Coupon[] };
 export type Coupon = { id: string; code: string; description: string; discount: number };
+export type BlingCustomer = {
+  id: string;
+  cpf: string;
+  name: string;
+  email?: string;
+  phone?: string;
+};
+export type FidelizeiCustomer = {
+  id: string;
+  cpf: string;
+  name: string;
+  tier: string;
+  points: number;
+  benefits: string[];
+  coupons: Coupon[];
+};
+export type LookupStatus = 'FOUND' | 'NOT_FOUND' | 'UNAVAILABLE';
+export type Customer = {
+  found: boolean;
+  cpf: string;
+  name?: string;
+  bling?: BlingCustomer;
+  fidelizei?: FidelizeiCustomer;
+  systems: { bling: LookupStatus; fidelizei: LookupStatus };
+};
 export type SaleItem = { productId: string; sku: string; name: string; quantity: number; unitPrice: number };
 export type Sale = {
   id: string;
