@@ -1,14 +1,19 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import { randomUUID } from 'node:crypto';
-import pg from 'pg';
 import { bling, fidelizei } from './integrations/demo.js';
+import {
+  consumeBlingOAuthState,
+  createBlingOAuthState,
+  exchangeBlingAuthorizationCode,
+  getBlingConnectionStatus
+} from './integrations/credentials.js';
+import { initializeDatabase, pool } from './db.js';
 import { money, type Customer, type Sale, type SaleItem } from './domain.js';
 
 const app = Fastify({ logger: true });
 await app.register(cors, { origin: true });
 const sales = new Map<string, Sale>();
-const pool = process.env.DATABASE_URL ? new pg.Pool({ connectionString: process.env.DATABASE_URL }) : undefined;
 const badRequest = (message: string): never => { throw Object.assign(new Error(message), { statusCode: 400 }); };
 const calculate = (items: SaleItem[], discount = 0) => {
   const subtotal = money(items.reduce((n, i) => n + i.quantity * i.unitPrice, 0));
@@ -37,11 +42,7 @@ const lookupCustomer = async (cpf: string): Promise<Customer> => {
   };
 };
 
-if (pool) {
-  await pool.query(`create table if not exists pdv_sales (
-    id uuid primary key, status text not null, data jsonb not null, updated_at timestamptz not null default now()
-  )`);
-}
+await initializeDatabase();
 const persist = async (sale: Sale) => {
   sales.set(sale.id, sale);
   if (pool) await pool.query(
@@ -52,6 +53,36 @@ const persist = async (sale: Sale) => {
 };
 
 app.get('/health', async () => ({ ok: true, persistence: pool ? 'postgres' : 'memory' }));
+app.get('/integrations/status', async () => ({
+  bling: await getBlingConnectionStatus(),
+  fidelizaPlus: {
+    configured: Boolean(process.env.FIDELIZAPLUS_API_URL && process.env.FIDELIZAPLUS_API_TOKEN),
+    connected: Boolean(process.env.FIDELIZAPLUS_API_URL && process.env.FIDELIZAPLUS_API_TOKEN),
+    mode: process.env.FIDELIZAPLUS_API_TOKEN ? 'api-token' : 'demo'
+  }
+}));
+app.get('/integrations/bling/connect', async (_req, reply) => {
+  const clientId = process.env.BLING_CLIENT_ID;
+  const redirectUri = process.env.BLING_REDIRECT_URI;
+  if (!clientId || !process.env.BLING_CLIENT_SECRET || !redirectUri) {
+    throw Object.assign(new Error('Aplicativo Bling ainda não configurado no servidor'), { statusCode: 503 });
+  }
+  const state = await createBlingOAuthState();
+  const authorizeUrl = new URL('https://www.bling.com.br/Api/v3/oauth/authorize');
+  authorizeUrl.searchParams.set('response_type', 'code');
+  authorizeUrl.searchParams.set('client_id', clientId);
+  authorizeUrl.searchParams.set('state', state);
+  return reply.redirect(authorizeUrl.toString());
+});
+app.get('/integrations/bling/callback', async (req, reply) => {
+  const query = req.query as { code?: string; state?: string; error?: string };
+  if (query.error) return badRequest(`Autorização Bling recusada: ${query.error}`);
+  if (!query.code || !query.state) return badRequest('Retorno OAuth do Bling incompleto');
+  if (!await consumeBlingOAuthState(query.state)) return badRequest('Estado OAuth inválido ou expirado');
+  await exchangeBlingAuthorizationCode(query.code);
+  const webUrl = process.env.PDV_WEB_URL ?? 'https://pdv-bling-fidelizei-web.onrender.com';
+  return reply.redirect(`${webUrl}?integration=bling-connected`);
+});
 app.get('/catalog/products', async () => bling.products());
 app.get('/catalog/sellers', async () => bling.sellers());
 app.get('/catalog/payment-methods', async () => bling.paymentMethods());
