@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: pdv-bling-fidelizei-api
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build -w @pdv/api
+    startCommand: npm start -w @pdv/api
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+
+  - type: web
+    name: pdv-bling-fidelizei-web
+    runtime: static
+    buildCommand: npm install && npm run build -w @pdv/web
+    staticPublishPath: apps/web/dist
+    envVars:
+      - key: VITE_API_URL
+        sync: false
+
+databases:
+  - name: pdv-bling-fidelizei-db
+    plan: free
