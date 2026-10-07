@@ -16,6 +16,16 @@ h2 { font-size: 19px; }
 small { font-size: 11px; color: #68736b; letter-spacing: .06em; }
 .header-actions { display: flex; align-items: center; gap: 12px; font-size: 13px; }
 .header-actions span { background: #e5eee7; padding: 10px 13px; border-radius: 8px; }
+.integration-strip { min-height: 58px; display: flex; align-items: center; gap: 14px; margin-bottom: 12px; padding: 9px 12px; border: 1px solid #dce4de; border-radius: 10px; background: #fff; box-shadow: 0 2px 9px #1d3c2710; }
+.integration-strip > div { display: grid; grid-template-columns: 10px auto auto; align-items: center; gap: 9px; min-width: 190px; padding-right: 14px; border-right: 1px solid #e7ebe8; }
+.integration-strip > div > div { display: flex; flex-direction: column; gap: 2px; }
+.integration-strip b { font-size: 12px; }
+.integration-strip small { letter-spacing: 0; }
+.integration-strip a { color: #197440; font-size: 11px; font-weight: 800; text-decoration: none; padding: 6px 8px; border: 1px solid #7bc394; border-radius: 7px; }
+.integration-strip a:hover { background: #edf8f1; }
+.integration-dot { width: 9px; height: 9px; border-radius: 50%; background: #d79b30; box-shadow: 0 0 0 3px #fff1d8; }
+.integration-dot.online { background: #2da45b; box-shadow: 0 0 0 3px #dff3e6; }
+.integration-note { margin-left: auto; color: #718078; font-size: 11px; }
 .steps { display: grid; grid-template-columns: repeat(3, 1fr); background: #dfe5e0; border-radius: 10px 10px 0 0; overflow: hidden; }
 .steps button { border: 0; padding: 13px; background: transparent; color: #5d6860; font-weight: 750; }
 .steps button.active { background: #2e9f5b; color: white; }
@@ -125,6 +135,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   .cart { min-height: 420px; }
   .catalog { grid-template-columns: 1fr; }
   .header-actions span { display: none; }
+  .integration-note { display: none; }
 }
 @media (max-width: 560px) {
   .steps button { font-size: 12px; }
@@ -135,6 +146,8 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   .cart-item { grid-template-columns: 1fr auto; }
   .cart-item > strong { grid-column: 1/3; }
   .header-actions { gap: 6px; }
+  .integration-strip { align-items: stretch; flex-direction: column; }
+  .integration-strip > div { min-width: 0; border-right: 0; border-bottom: 1px solid #e7ebe8; padding: 4px 0 10px; }
   .section-title { align-items: flex-start; }
   .section-title > span { white-space: normal; text-align: center; }
 }
