@@ -1,0 +1,10 @@
+{
+  "name": "pdv-bling-fidelizei",
+  "private": true,
+  "workspaces": ["apps/*", "packages/*"],
+  "scripts": {
+    "dev": "npm run dev -w @pdv/api",
+    "dev:web": "npm run dev -w @pdv/web",
+    "build": "npm run build -w @pdv/api && npm run build -w @pdv/web"
+  }
+}
