@@ -83,7 +83,10 @@ app.get('/integrations/bling/callback', async (req, reply) => {
   const webUrl = process.env.PDV_WEB_URL ?? 'https://pdv-bling-fidelizei-web.onrender.com';
   return reply.redirect(`${webUrl}?integration=bling-connected`);
 });
-app.get('/catalog/products', async () => bling.products());
+app.get('/catalog/products', async (req) => {
+  const query = (req.query as { query?: string }).query ?? '';
+  return bling.products(query);
+});
 app.get('/catalog/sellers', async () => bling.sellers());
 app.get('/catalog/payment-methods', async () => bling.paymentMethods());
 app.get('/customers/:cpf', async (req) => lookupCustomer((req.params as { cpf: string }).cpf));
