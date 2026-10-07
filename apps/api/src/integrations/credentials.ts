@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 import { pool } from '../db.js';
 
 const BLING_TOKEN_URL = 'https://api.bling.com.br/Api/v3/oauth/token';
@@ -12,10 +12,14 @@ type BlingTokenResponse = {
 
 const encryptionKey = () => {
   const raw = process.env.CREDENTIALS_ENCRYPTION_KEY;
-  if (!raw) throw new Error('CREDENTIALS_ENCRYPTION_KEY não configurada');
-  const key = Buffer.from(raw, 'base64');
-  if (key.length !== 32) throw new Error('CREDENTIALS_ENCRYPTION_KEY deve possuir 32 bytes em base64');
-  return key;
+  if (raw) {
+    const key = Buffer.from(raw, 'base64');
+    if (key.length !== 32) throw new Error('CREDENTIALS_ENCRYPTION_KEY deve possuir 32 bytes em base64');
+    return key;
+  }
+  const fallback = process.env.BLING_CLIENT_SECRET;
+  if (!fallback) throw new Error('Chave de criptografia ou segredo Bling não configurado');
+  return createHash('sha256').update(fallback).digest();
 };
 const encrypt = (value: string) => {
   const iv = randomBytes(12);
