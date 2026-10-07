@@ -46,6 +46,18 @@ label { display: block; font-size: 13px; font-weight: 700; margin: 18px 0; }
 .customer-card p { font-size: 13px; color: #667269; }
 .customer-card > div:last-child { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
 .vip { display: inline-block; background: #e7b93d; color: #302600; font-size: 11px; font-weight: 800; padding: 5px 8px; border-radius: 99px; }
+.customer-card.unified { align-items: stretch; }
+.customer-identity { min-width: 0; }
+.customer-identity h3 { font-size: 18px; }
+.customer-identity > small { display: block; margin-top: 10px; color: #647068; overflow: hidden; text-overflow: ellipsis; }
+.source-badges { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.source-status { display: inline-flex; align-items: center; width: fit-content; padding: 5px 8px; border-radius: 99px; font-size: 10px; font-weight: 800; letter-spacing: .02em; }
+.source-status.found { background: #dff4e6; color: #17683a; }
+.source-status.missing { background: #eef1ef; color: #667169; }
+.source-status.unavailable { background: #fff0cd; color: #70520b; }
+.loyalty-panel { border-left: 1px solid #dce7df; padding-left: 18px; display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 7px; }
+.loyalty-panel p { line-height: 1.45; }
+.benefits { display: flex; flex-direction: column; gap: 4px; color: #43604d; }
 .empty-state { border: 1px dashed #cbd5cd; color: #718077; padding: 30px; text-align: center; border-radius: 10px; }
 .empty-state.compact { padding: 18px; margin-top: 10px; }
 .totals-grid { display: grid; grid-template-columns: 1fr 1fr 1.2fr; gap: 10px; }
@@ -119,6 +131,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   .workspace { min-height: auto; }
   .panel, .cart { padding: 16px; }
   .totals-grid, .customer-card, .payment-options { grid-template-columns: 1fr; }
+  .loyalty-panel { border-left: 0; border-top: 1px solid #dce7df; padding: 14px 0 0; }
   .cart-item { grid-template-columns: 1fr auto; }
   .cart-item > strong { grid-column: 1/3; }
   .header-actions { gap: 6px; }
