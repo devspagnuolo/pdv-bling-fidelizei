@@ -32,6 +32,10 @@ type CustomerLookup = {
     fidelizei: 'FOUND' | 'NOT_FOUND' | 'UNAVAILABLE';
   };
 };
+type IntegrationStatus = {
+  bling: { configured: boolean; connected: boolean; mode: string; expiresAt?: string };
+  fidelizaPlus: { configured: boolean; connected: boolean; mode: string };
+};
 type Item = Product & { quantity: number };
 type Step = 'product' | 'customer' | 'payment';
 const brl = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' });
@@ -51,6 +55,7 @@ function App() {
   const [products, setProducts] = useState<Product[]>([]);
   const [sellers, setSellers] = useState<Seller[]>([]);
   const [paymentMethods, setPaymentMethods] = useState<PaymentMethod[]>([]);
+  const [integrations, setIntegrations] = useState<IntegrationStatus>();
   const [items, setItems] = useState<Item[]>([]);
   const [query, setQuery] = useState('');
   const [seller, setSeller] = useState('');
@@ -67,6 +72,11 @@ function App() {
       if (!response.ok) throw new Error(path);
       return response.json();
     };
+    load<IntegrationStatus>('/integrations/status').then(setIntegrations).catch(() => undefined);
+    if (new URLSearchParams(window.location.search).get('integration') === 'bling-connected') {
+      setMessage('Bling conectado com sucesso.');
+      window.history.replaceState({}, '', window.location.pathname);
+    }
     Promise.all([
       load<Product[]>('/catalog/products'),
       load<Seller[]>('/catalog/sellers'),
@@ -175,6 +185,19 @@ function App() {
       <div><small>PDV INDEPENDENTE</small><h1>Venda</h1></div>
       <div className="header-actions"><span>Operador: Caixa Demo</span><button className="secondary">Nova venda</button></div>
     </header>
+
+    <section className="integration-strip" aria-label="Status das integrações">
+      <div>
+        <span className={integrations?.bling.connected ? 'integration-dot online' : 'integration-dot'} />
+        <div><b>Bling</b><small>{integrations?.bling.connected ? 'Conectado ao PDV' : integrations?.bling.configured ? 'Pronto para autorizar' : 'Configuração pendente'}</small></div>
+        {integrations?.bling.configured && !integrations.bling.connected && <a href={`${api}/integrations/bling/connect`}>Conectar</a>}
+      </div>
+      <div>
+        <span className={integrations?.fidelizaPlus.connected ? 'integration-dot online' : 'integration-dot'} />
+        <div><b>Fideliza+</b><small>{integrations?.fidelizaPlus.connected ? 'Conectado ao PDV' : 'Configuração pendente'}</small></div>
+      </div>
+      <span className="integration-note">Credenciais protegidas no servidor</span>
+    </section>
 
     <nav className="steps">
       <button className={step === 'product' ? 'active' : ''} onClick={() => setStep('product')}>1 · Produto</button>
