@@ -58,6 +58,8 @@ function App() {
   const [integrations, setIntegrations] = useState<IntegrationStatus>();
   const [items, setItems] = useState<Item[]>([]);
   const [query, setQuery] = useState('');
+  const [catalogSearchActive, setCatalogSearchActive] = useState(false);
+  const [searchingCatalog, setSearchingCatalog] = useState(false);
   const [seller, setSeller] = useState('');
   const [cpf, setCpf] = useState('');
   const [customer, setCustomer] = useState<CustomerLookup>();
@@ -92,7 +94,9 @@ function App() {
 
   const subtotal = useMemo(() => items.reduce((n, x) => n + x.price * x.quantity, 0), [items]);
   const total = sale?.total ?? subtotal;
-  const filtered = products.filter(p => `${p.name} ${p.sku}`.toLowerCase().includes(query.toLowerCase()));
+  const filtered = catalogSearchActive
+    ? products
+    : products.filter(p => `${p.name} ${p.sku} ${p.barcode ?? ''}`.toLowerCase().includes(query.toLowerCase()));
   const selectedPaymentMethod = paymentMethods.find(method => method.id === paymentMethodId);
   const paymentSource = paymentMethods[0]?.source;
   const loyaltyCustomer = customer?.fidelizei;
@@ -111,6 +115,24 @@ function App() {
   const quantity = (id: string, delta: number) => changeCart(items
     .map(i => i.id === id ? { ...i, quantity: Math.max(0, Math.min(i.stock, i.quantity + delta)) } : i)
     .filter(i => i.quantity > 0));
+
+  const searchCatalog = async () => {
+    const term = query.trim();
+    setSearchingCatalog(true);
+    setMessage('');
+    try {
+      const response = await fetch(`${api}/catalog/products?query=${encodeURIComponent(term)}`);
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.message ?? 'Não foi possível consultar os produtos.');
+      setProducts(data);
+      setCatalogSearchActive(true);
+      if (!data.length) setMessage('Nenhum produto encontrado no Bling.');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Não foi possível consultar os produtos.');
+    } finally {
+      setSearchingCatalog(false);
+    }
+  };
 
   const lookup = async () => {
     setMessage('');
@@ -209,9 +231,13 @@ function App() {
       <article className="panel">
         {step === 'product' && <>
           <div className="section-title"><div><small>ETAPA 1</small><h2>Adicionar produtos</h2></div><span>{products.length} itens sincronizados</span></div>
-          <input className="search" value={query} onChange={e => setQuery(e.target.value)} placeholder="Pesquisar produto, descrição ou SKU" autoFocus />
+          <div className="catalog-search">
+            <input className="search" value={query} onChange={e => { setQuery(e.target.value); setCatalogSearchActive(false); }} onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); void searchCatalog(); } }} placeholder="Bipe o código de barras ou pesquise SKU / produto" autoFocus />
+            <button className="search-action" onClick={() => void searchCatalog()} disabled={searchingCatalog}>{searchingCatalog ? 'Buscando…' : 'Buscar'}</button>
+          </div>
+          <p className="scanner-hint">Leitor de código de barras conectado? Basta bipar e pressionar Enter.</p>
           <div className="catalog">{filtered.map(p => <button className="product" disabled={!p.stock} onClick={() => add(p)} key={p.id}>
-            <span><b>{p.name}</b><small>{p.sku} · {p.stock} em estoque</small></span><strong>{brl.format(p.price)}</strong>
+            <span><b>{p.name}</b><small>{p.sku}{p.barcode ? ` · ${p.barcode}` : ''} · {p.stock} em estoque</small></span><strong>{brl.format(p.price)}</strong>
           </button>)}</div>
           <button className="next" disabled={!items.length} onClick={() => setStep('customer')}>Continuar para cliente</button>
         </>}
