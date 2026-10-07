@@ -3,7 +3,7 @@ import cors from '@fastify/cors';
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { bling, fidelizei } from './integrations/demo.js';
-import { money, type Sale, type SaleItem } from './domain.js';
+import { money, type Customer, type Sale, type SaleItem } from './domain.js';
 
 const app = Fastify({ logger: true });
 await app.register(cors, { origin: true });
@@ -13,6 +13,28 @@ const badRequest = (message: string): never => { throw Object.assign(new Error(m
 const calculate = (items: SaleItem[], discount = 0) => {
   const subtotal = money(items.reduce((n, i) => n + i.quantity * i.unitPrice, 0));
   return { subtotal, discount, total: money(Math.max(0, subtotal - discount)) };
+};
+const lookupCustomer = async (cpf: string): Promise<Customer> => {
+  const normalizedCpf = cpf.replace(/\D/g, '');
+  if (normalizedCpf.length !== 11) return badRequest('Informe um CPF válido com 11 dígitos');
+
+  const [blingResult, fidelizeiResult] = await Promise.allSettled([
+    bling.findCustomer(normalizedCpf),
+    fidelizei.findCustomer(normalizedCpf)
+  ]);
+  const blingCustomer = blingResult.status === 'fulfilled' ? blingResult.value : undefined;
+  const fidelizeiCustomer = fidelizeiResult.status === 'fulfilled' ? fidelizeiResult.value : undefined;
+  return {
+    found: Boolean(blingCustomer || fidelizeiCustomer),
+    cpf: normalizedCpf,
+    name: blingCustomer?.name ?? fidelizeiCustomer?.name,
+    bling: blingCustomer,
+    fidelizei: fidelizeiCustomer,
+    systems: {
+      bling: blingResult.status === 'rejected' ? 'UNAVAILABLE' : blingCustomer ? 'FOUND' : 'NOT_FOUND',
+      fidelizei: fidelizeiResult.status === 'rejected' ? 'UNAVAILABLE' : fidelizeiCustomer ? 'FOUND' : 'NOT_FOUND'
+    }
+  };
 };
 
 if (pool) {
@@ -33,11 +55,14 @@ app.get('/health', async () => ({ ok: true, persistence: pool ? 'postgres' : 'me
 app.get('/catalog/products', async () => bling.products());
 app.get('/catalog/sellers', async () => bling.sellers());
 app.get('/catalog/payment-methods', async () => bling.paymentMethods());
-app.get('/customers/:cpf', async (req) => fidelizei.findCustomer((req.params as { cpf: string }).cpf));
+app.get('/customers/:cpf', async (req) => lookupCustomer((req.params as { cpf: string }).cpf));
 app.post('/sales', async (req) => {
   const body = req.body as { operatorId: string; sellerId: string; items: SaleItem[]; customerCpf?: string };
-  if (!body.operatorId || !body.sellerId || !body.items?.length) return badRequest('Operador, vendedor e itens são obrigatórios');
-  const customer = body.customerCpf ? await fidelizei.findCustomer(body.customerCpf) : undefined;
+  if (!body.operatorId || !body.sellerId || !body.items?.length) {
+    return badRequest('Operador, vendedor e itens são obrigatórios');
+  }
+  const lookup = body.customerCpf ? await lookupCustomer(body.customerCpf) : undefined;
+  const customer = lookup?.found ? lookup : undefined;
   const amounts = calculate(body.items);
   const sale: Sale = {
     id: randomUUID(),
@@ -55,8 +80,9 @@ app.post('/sales', async (req) => {
 app.post('/sales/:id/coupon', async (req) => {
   const sale = sales.get((req.params as { id: string }).id);
   const { code } = req.body as { code: string };
-  if (!sale || !sale.customer) return badRequest('Venda ou cliente não encontrado');
-  const reservation = await fidelizei.validateAndReserve(code, sale.customer.id, sale.subtotal);
+  const fidelizeiCustomer = sale?.customer?.fidelizei;
+  if (!sale || !fidelizeiCustomer) return badRequest('Cliente não cadastrado no Fidelizei');
+  const reservation = await fidelizei.validateAndReserve(code, fidelizeiCustomer.id, sale.subtotal);
   Object.assign(sale, {
     coupon: reservation.coupon,
     reservationId: reservation.reservationId,
@@ -76,7 +102,7 @@ app.post('/sales/:id/complete', async (req) => {
 
   Object.assign(sale, { paymentMethodId: paymentMethod.id, paymentMethodName: paymentMethod.name });
   const order = await bling.createOrder({
-    customerId: sale.customer?.id,
+    customerId: sale.customer?.bling?.id,
     sellerId: sale.sellerId,
     items: sale.items,
     discount: sale.discount,
