@@ -5,14 +5,33 @@ import './styles.css';
 const api = import.meta.env.VITE_API_URL || 'http://localhost:3333';
 type Product = { id: string; sku: string; name: string; price: number; stock: number };
 type Seller = { id: string; name: string };
+type PaymentMethod = {
+  id: string;
+  name: string;
+  type: string;
+  active: boolean;
+  isDefault?: boolean;
+  source: 'BLING' | 'DEMO';
+};
 type Item = Product & { quantity: number };
 type Step = 'product' | 'customer' | 'payment';
 const brl = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' });
+
+const paymentIcon = (method: PaymentMethod) => {
+  const value = `${method.type} ${method.name}`.toLowerCase();
+  if (value.includes('pix')) return '◆';
+  if (value.includes('dinheiro') || value.includes('cash')) return 'R$';
+  if (value.includes('boleto')) return '▤';
+  if (value.includes('crediário') || value.includes('crediario')) return '◫';
+  if (value.includes('cart') || value.includes('credit') || value.includes('debit')) return '▰';
+  return '●';
+};
 
 function App() {
   const [step, setStep] = useState<Step>('product');
   const [products, setProducts] = useState<Product[]>([]);
   const [sellers, setSellers] = useState<Seller[]>([]);
+  const [paymentMethods, setPaymentMethods] = useState<PaymentMethod[]>([]);
   const [items, setItems] = useState<Item[]>([]);
   const [query, setQuery] = useState('');
   const [seller, setSeller] = useState('');
@@ -20,23 +39,33 @@ function App() {
   const [customer, setCustomer] = useState<any>();
   const [coupon, setCoupon] = useState('');
   const [sale, setSale] = useState<any>();
-  const [paymentMethod, setPaymentMethod] = useState('CREDIT_CARD');
+  const [paymentMethodId, setPaymentMethodId] = useState('');
   const [message, setMessage] = useState('');
 
   useEffect(() => {
+    const load = async <T,>(path: string): Promise<T> => {
+      const response = await fetch(`${api}${path}`);
+      if (!response.ok) throw new Error(path);
+      return response.json();
+    };
     Promise.all([
-      fetch(`${api}/catalog/products`).then(r => r.json()),
-      fetch(`${api}/catalog/sellers`).then(r => r.json())
-    ]).then(([p, s]) => {
+      load<Product[]>('/catalog/products'),
+      load<Seller[]>('/catalog/sellers'),
+      load<PaymentMethod[]>('/catalog/payment-methods')
+    ]).then(([p, s, methods]) => {
       setProducts(p);
       setSellers(s);
+      setPaymentMethods(methods);
       setSeller(s[0]?.id ?? '');
-    }).catch(() => setMessage('Não foi possível carregar o catálogo.'));
+      setPaymentMethodId(methods.find(method => method.isDefault)?.id ?? methods[0]?.id ?? '');
+    }).catch(() => setMessage('Não foi possível carregar os dados sincronizados do PDV.'));
   }, []);
 
   const subtotal = useMemo(() => items.reduce((n, x) => n + x.price * x.quantity, 0), [items]);
   const total = sale?.total ?? subtotal;
   const filtered = products.filter(p => `${p.name} ${p.sku}`.toLowerCase().includes(query.toLowerCase()));
+  const selectedPaymentMethod = paymentMethods.find(method => method.id === paymentMethodId);
+  const paymentSource = paymentMethods[0]?.source;
 
   const changeCart = (next: Item[]) => {
     setItems(next);
@@ -68,7 +97,13 @@ function App() {
         operatorId: 'operator-demo',
         sellerId: seller,
         customerCpf: cpf,
-        items: items.map(x => ({ productId: x.id, sku: x.sku, name: x.name, quantity: x.quantity, unitPrice: x.price }))
+        items: items.map(x => ({
+          productId: x.id,
+          sku: x.sku,
+          name: x.name,
+          quantity: x.quantity,
+          unitPrice: x.price
+        }))
       })
     });
     const data = await r.json();
@@ -95,9 +130,10 @@ function App() {
     const r = await fetch(`${api}/sales/${activeSale.id}/complete`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ paymentMethod })
+      body: JSON.stringify({ paymentMethodId })
     });
     const data = await r.json();
+    if (!r.ok) return setMessage(data.message ?? 'Não foi possível concluir a venda.');
     setSale(data);
     setMessage(data.status === 'COMPLETED'
       ? `Venda concluída. Pedido Bling: ${data.blingOrderId}`
@@ -139,21 +175,47 @@ function App() {
         </>}
 
         {step === 'payment' && <>
-          <div className="section-title"><div><small>ETAPA 3</small><h2>Pagamento</h2></div><span>Venda segura</span></div>
+          <div className="section-title">
+            <div><small>ETAPA 3</small><h2>Pagamento</h2></div>
+            <span className="bling-badge">{paymentSource === 'BLING' ? 'Sincronizado do Bling' : 'Ambiente demonstrativo'}</span>
+          </div>
           <div className="totals-grid">
             <div><small>Subtotal</small><b>{brl.format(subtotal)}</b></div>
             <div><small>Desconto</small><b>{brl.format(sale?.discount ?? 0)}</b></div>
             <div className="grand"><small>Total da venda</small><b>{brl.format(total)}</b></div>
           </div>
-          <label>Forma de pagamento<select value={paymentMethod} onChange={e => setPaymentMethod(e.target.value)}>
-            <option value="CASH">Dinheiro</option><option value="PIX">Pix</option><option value="DEBIT_CARD">Cartão de débito</option>
-            <option value="CREDIT_CARD">Cartão de crédito</option><option value="STORE_CREDIT">Crédito da loja</option>
-          </select></label>
+
+          <section className="payment-section">
+            <div className="payment-heading">
+              <div><h3>Como o cliente vai pagar?</h3><p>Escolha uma forma ativa cadastrada no financeiro do Bling.</p></div>
+              <span>{paymentMethods.length} disponíveis</span>
+            </div>
+            <div className="payment-options" role="radiogroup" aria-label="Forma de pagamento">
+              {paymentMethods.map(method => <button
+                type="button"
+                role="radio"
+                aria-checked={paymentMethodId === method.id}
+                className={paymentMethodId === method.id ? 'payment-option active' : 'payment-option'}
+                onClick={() => setPaymentMethodId(method.id)}
+                key={method.id}
+              >
+                <span className="payment-icon">{paymentIcon(method)}</span>
+                <span><b>{method.name}</b><small>{method.type === 'OTHER' ? 'Bling' : method.type.replaceAll('_', ' ')}</small></span>
+                <i>✓</i>
+              </button>)}
+            </div>
+            {!paymentMethods.length && <div className="empty-state compact">Nenhuma forma de pagamento disponível.</div>}
+          </section>
+
           <label>Vendedor<select value={seller} onChange={e => setSeller(e.target.value)}>
             <option value="">Selecione o vendedor</option>{sellers.map(s => <option value={s.id} key={s.id}>{s.name}</option>)}
           </select></label>
-          <div className="summary"><span>Cliente <b>{customer?.name ?? 'Não identificado'}</b></span><span>Pagamento <b>{paymentMethod === 'PIX' ? 'Pix' : paymentMethod === 'CASH' ? 'Dinheiro' : 'Cartão'}</b></span></div>
-          <div className="nav-actions"><button className="secondary" onClick={() => setStep('customer')}>Voltar</button><button className="finish" disabled={!items.length || !seller} onClick={complete}>Finalizar venda</button></div>
+          <div className="summary">
+            <span>Cliente <b>{customer?.name ?? 'Não identificado'}</b></span>
+            <span>Pagamento <b>{selectedPaymentMethod?.name ?? 'Selecione'}</b></span>
+            <span>Vendedor <b>{sellers.find(item => item.id === seller)?.name ?? 'Selecione'}</b></span>
+          </div>
+          <div className="nav-actions"><button className="secondary" onClick={() => setStep('customer')}>Voltar</button><button className="finish" disabled={!items.length || !seller || !paymentMethodId} onClick={complete}>Finalizar venda · {brl.format(total)}</button></div>
         </>}
         {message && <p className={sale?.status === 'COMPLETED' ? 'message success' : 'message'}>{message}</p>}
       </article>
