@@ -1,4 +1,11 @@
-import type { Customer, PaymentMethod, Product, SaleItem, Seller } from '../domain.js';
+import type {
+  BlingCustomer,
+  FidelizeiCustomer,
+  PaymentMethod,
+  Product,
+  SaleItem,
+  Seller
+} from '../domain.js';
 
 const products: Product[] = [
   { id: 'bling-prod-1', sku: 'VEST-001', name: 'Vestido Midi', price: 199.9, stock: 8 },
@@ -15,7 +22,23 @@ const demoPaymentMethods: PaymentMethod[] = [
   { id: 'demo-debit', name: 'Cartão de débito', type: 'DEBIT_CARD', active: true, source: 'DEMO' },
   { id: 'demo-cash', name: 'Dinheiro', type: 'CASH', active: true, source: 'DEMO' }
 ];
-const customer: Customer = {
+const demoBlingCustomers: BlingCustomer[] = [
+  {
+    id: 'bling-customer-1',
+    cpf: '12345678909',
+    name: 'Maria da Silva',
+    email: 'maria@exemplo.com',
+    phone: '11999990000'
+  },
+  {
+    id: 'bling-customer-2',
+    cpf: '52998224725',
+    name: 'Carlos Almeida',
+    email: 'carlos@exemplo.com',
+    phone: '11988880000'
+  }
+];
+const fidelizeiCustomer: FidelizeiCustomer = {
   id: 'fid-customer-1',
   cpf: '12345678909',
   name: 'Maria da Silva',
@@ -80,11 +103,43 @@ const fetchPaymentMethods = async (): Promise<PaymentMethod[]> => {
   paymentMethodCache = { expiresAt: Date.now() + PAYMENT_METHOD_CACHE_MS, data: activeMethods };
   return activeMethods;
 };
+const findBlingCustomer = async (cpf: string): Promise<BlingCustomer | undefined> => {
+  const normalizedCpf = cpf.replace(/\D/g, '');
+  const accessToken = process.env.BLING_ACCESS_TOKEN;
+  if (!accessToken) return demoBlingCustomers.find(customer => customer.cpf === normalizedCpf);
+
+  const url = new URL(`${BLING_API_URL}/contatos`);
+  url.searchParams.set('pagina', '1');
+  url.searchParams.set('limite', '1');
+  url.searchParams.set('numeroDocumento', normalizedCpf);
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' }
+  });
+  if (!response.ok) throw new Error(`Bling não retornou o cliente (HTTP ${response.status})`);
+
+  const payload = await response.json() as { data?: unknown };
+  const rows = Array.isArray(payload.data) ? payload.data : [];
+  const raw = rows.find((row): row is Record<string, unknown> => Boolean(row) && typeof row === 'object');
+  if (!raw) return undefined;
+
+  const id = valueAsText(raw.id);
+  const name = valueAsText(raw.nome ?? raw.fantasia);
+  const document = valueAsText(raw.numeroDocumento)?.replace(/\D/g, '');
+  if (!id || !name || document !== normalizedCpf) return undefined;
+  return {
+    id,
+    cpf: document,
+    name,
+    email: valueAsText(raw.email),
+    phone: valueAsText(raw.celular ?? raw.telefone)
+  };
+};
 
 export const bling = {
   products: async () => products,
   sellers: async () => sellers,
   paymentMethods: fetchPaymentMethods,
+  findCustomer: findBlingCustomer,
   createOrder: async (input: {
     customerId?: string;
     sellerId: string;
@@ -95,12 +150,21 @@ export const bling = {
   }) => ({ id: `bling-order-${input.idempotencyKey}`, status: 'CONFIRMED' as const })
 };
 export const fidelizei = {
-  findCustomer: async (cpf: string) => cpf.replace(/\D/g, '') === customer.cpf ? customer : undefined,
+  findCustomer: async (cpf: string) => cpf.replace(/\D/g, '') === fidelizeiCustomer.cpf ? fidelizeiCustomer : undefined,
   validateAndReserve: async (code: string, customerId: string, subtotal: number) => {
-    const coupon = customer.coupons.find(c => c.code === code.toUpperCase());
-    if (!coupon || customerId !== customer.id || subtotal < coupon.discount) throw new Error('Cupom inválido para esta compra');
-    return { coupon, reservationId: `reserve-${coupon.id}-${Date.now()}`, expiresAt: new Date(Date.now() + 10 * 60_000).toISOString() };
+    const coupon = fidelizeiCustomer.coupons.find(c => c.code === code.toUpperCase());
+    if (!coupon || customerId !== fidelizeiCustomer.id || subtotal < coupon.discount) {
+      throw new Error('Cupom inválido para esta compra');
+    }
+    return {
+      coupon,
+      reservationId: `reserve-${coupon.id}-${Date.now()}`,
+      expiresAt: new Date(Date.now() + 10 * 60_000).toISOString()
+    };
   },
-  consumeReservation: async (reservationId: string, saleId: string) => ({ transactionId: `fid-tx-${saleId}`, reservationId }),
+  consumeReservation: async (reservationId: string, saleId: string) => ({
+    transactionId: `fid-tx-${saleId}`,
+    reservationId
+  }),
   releaseReservation: async (_reservationId: string) => undefined
 };
