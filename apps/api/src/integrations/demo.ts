@@ -52,6 +52,7 @@ const fidelizeiCustomer: FidelizeiCustomer = {
 const BLING_API_URL = 'https://api.bling.com.br/Api/v3';
 const PAYMENT_METHOD_CACHE_MS = 5 * 60_000;
 let paymentMethodCache: { expiresAt: number; data: PaymentMethod[] } | undefined;
+let productCache = new Map<string, { expiresAt: number; data: Product[] }>();
 
 const valueAsText = (value: unknown) => {
   if (typeof value === 'string' || typeof value === 'number') return String(value);
@@ -104,6 +105,54 @@ const fetchPaymentMethods = async (): Promise<PaymentMethod[]> => {
   paymentMethodCache = { expiresAt: Date.now() + PAYMENT_METHOD_CACHE_MS, data: activeMethods };
   return activeMethods;
 };
+const asNumber = (value: unknown, fallback = 0) => {
+  const number = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(number) ? number : fallback;
+};
+const normalizeProduct = (raw: Record<string, unknown>): Product | undefined => {
+  const id = valueAsText(raw.id);
+  const name = valueAsText(raw.nome);
+  if (!id || !name) return undefined;
+  return {
+    id,
+    sku: valueAsText(raw.codigo) ?? id,
+    name,
+    price: asNumber(raw.preco ?? raw.precoVenda),
+    stock: asNumber(raw.estoqueAtual ?? raw.estoque ?? (raw.saldo as Record<string, unknown> | undefined)?.saldoVirtualTotal),
+    barcode: valueAsText(raw.gtin ?? raw.gtinPrincipal)
+  };
+};
+const fetchProducts = async (query = ''): Promise<Product[]> => {
+  const normalizedQuery = query.trim();
+  const accessToken = await getBlingAccessToken();
+  if (!accessToken) {
+    const term = normalizedQuery.toLowerCase();
+    return term ? products.filter(product => `${product.name} ${product.sku} ${product.barcode ?? ''}`.toLowerCase().includes(term)) : products;
+  }
+  const cached = productCache.get(normalizedQuery);
+  if (cached && cached.expiresAt > Date.now()) return cached.data;
+
+  const url = new URL(`${BLING_API_URL}/produtos`);
+  url.searchParams.set('pagina', '1');
+  url.searchParams.set('limite', '100');
+  if (normalizedQuery) {
+    if (/^\\d{8,14}$/.test(normalizedQuery)) url.searchParams.append('gtins[]', normalizedQuery);
+    else url.searchParams.set('pesquisa', normalizedQuery);
+  }
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json', 'enable-jwt': '1' }
+  });
+  if (!response.ok) throw new Error(`Bling não retornou os produtos (HTTP ${response.status})`);
+  const payload = await response.json() as { data?: unknown };
+  const rows = Array.isArray(payload.data) ? payload.data : [];
+  const result = rows
+    .filter((row): row is Record<string, unknown> => Boolean(row) && typeof row === 'object')
+    .map(normalizeProduct)
+    .filter((product): product is Product => Boolean(product));
+  productCache.set(normalizedQuery, { expiresAt: Date.now() + 60_000, data: result });
+  return result;
+};
+
 const findBlingCustomer = async (cpf: string): Promise<BlingCustomer | undefined> => {
   const normalizedCpf = cpf.replace(/\D/g, '');
   const accessToken = await getBlingAccessToken();
@@ -137,7 +186,7 @@ const findBlingCustomer = async (cpf: string): Promise<BlingCustomer | undefined
 };
 
 export const bling = {
-  products: async () => products,
+  products: fetchProducts,
   sellers: async () => sellers,
   paymentMethods: fetchPaymentMethods,
   findCustomer: findBlingCustomer,
