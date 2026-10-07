@@ -99,12 +99,16 @@ export const exchangeBlingAuthorizationCode = async (code: string) => {
 };
 export const getBlingAccessToken = async (): Promise<string | undefined> => {
   if (pool) {
-    const result = await pool.query<{
-      access_token: string;
-      refresh_token: string | null;
-      expires_at: Date | null;
-    }>(`select access_token, refresh_token, expires_at
-        from integration_credentials where provider = 'BLING'`);
+    const result = await pool.query(
+      `select access_token, refresh_token, expires_at
+       from integration_credentials where provider = 'BLING'`
+    ) as {
+      rows: Array<{
+        access_token: string;
+        refresh_token: string | null;
+        expires_at: Date | null;
+      }>;
+    };
     const credential = result.rows[0];
     if (credential) {
       const expiresAt = credential.expires_at?.getTime() ?? 0;
@@ -137,15 +141,15 @@ export const consumeBlingOAuthState = async (state: string) => {
      where state = $1 and provider = 'BLING' and expires_at > now()
      returning state`,
     [state]
-  );
+  ) as { rowCount: number | null };
   return Boolean(result.rowCount);
 };
 export const getBlingConnectionStatus = async () => {
   const oauthConfigured = Boolean(process.env.BLING_CLIENT_ID && process.env.BLING_CLIENT_SECRET);
   if (pool) {
-    const result = await pool.query<{ expires_at: Date | null; updated_at: Date }>(
+    const result = await pool.query(
       `select expires_at, updated_at from integration_credentials where provider = 'BLING'`
-    );
+    ) as { rows: Array<{ expires_at: Date | null; updated_at: Date }> };
     if (result.rows[0]) {
       return {
         configured: oauthConfigured,
