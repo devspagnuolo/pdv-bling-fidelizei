@@ -160,7 +160,8 @@ const createOrder = async (input: { customerId?: string; sellerId: string; items
 };
 
 const fidelizeiConfig = () => {
-  const url = (process.env.FIDELIZEI_API_URL ?? 'https://api.fidelizaplus.com.br/public/v1').replace(/\/$/, '');
+  const configuredUrl = (process.env.FIDELIZEI_API_URL ?? 'https://api.fidelizaplus.com.br/public/v1').replace(/\/$/, '');
+  const url = configuredUrl.endsWith('/public/v1') ? configuredUrl : `${configuredUrl}/public/v1`;
   const key = process.env.FIDELIZEI_API_KEY;
   if (!key) throw new Error('FIDELIZEI_API_KEY não configurada');
   return { url, key };
