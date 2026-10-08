@@ -305,20 +305,10 @@ function App() {
               <div><h3>Como o cliente vai pagar?</h3><p>Escolha uma forma ativa cadastrada no financeiro do Bling.</p></div>
               <span>{paymentMethods.length} disponíveis</span>
             </div>
-            <div className="payment-options" role="radiogroup" aria-label="Forma de pagamento">
-              {paymentMethods.map(method => <button
-                type="button"
-                role="radio"
-                aria-checked={paymentMethodId === method.id}
-                className={paymentMethodId === method.id ? 'payment-option active' : 'payment-option'}
-                onClick={() => setPaymentMethodId(method.id)}
-                key={method.id}
-              >
-                <span className="payment-icon">{paymentIcon(method)}</span>
-                <span><b>{method.name}</b><small>{method.type === 'OTHER' ? 'Bling' : method.type.replaceAll('_', ' ')}</small></span>
-                <i>✓</i>
-              </button>)}
-            </div>
+            <label className="payment-select-label">Forma de pagamento<select value={paymentMethodId} onChange={e => setPaymentMethodId(e.target.value)} aria-label="Forma de pagamento">
+              <option value="">Selecione uma forma cadastrada no Bling</option>
+              {paymentMethods.map(method => <option value={method.id} key={method.id}>{paymentIcon(method)} {method.name}</option>)}
+            </select></label>
             {!paymentMethods.length && <div className="empty-state compact">Nenhuma forma de pagamento disponível.</div>}
           </section>
 
