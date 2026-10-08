@@ -72,6 +72,7 @@ function App() {
   useEffect(() => {
     const onShortcut = (event: KeyboardEvent) => {
       if (event.key === 'F2') { event.preventDefault(); searchInputRef.current?.focus(); }
+      if (event.key === 'F4') { event.preventDefault(); setStep('customer'); }
       if (event.key === 'F10') { event.preventDefault(); setStep('payment'); }
     };
     window.addEventListener('keydown', onShortcut);
@@ -356,7 +357,7 @@ function App() {
           <div className="cart-total"><span>Total</span><strong>{brl.format(total)}</strong></div>
           {step === 'product' && <button className="cart-primary" disabled={!items.length} onClick={() => setStep('customer')}>Identificar cliente <kbd>F4</kbd></button>}
           {step === 'customer' && <button className="cart-primary" disabled={!items.length} onClick={() => setStep('payment')}>Ir para pagamento <kbd>F10</kbd></button>}
-          {step === 'payment' && <button className="cart-primary" disabled={!items.length || !seller || !paymentMethodId} onClick={complete}>Finalizar · {brl.format(total)} <kbd>F10</kbd></button>}
+          {step === 'payment' && <button className="cart-primary" disabled={!items.length || !seller || !paymentMethodId} onClick={complete}>Finalizar · {brl.format(total)}</button>}
         </div>
       </aside>
     </section>
