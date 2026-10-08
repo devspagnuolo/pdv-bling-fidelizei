@@ -1,7 +1,7 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import { randomUUID } from 'node:crypto';
-import { bling, fidelizei, getFidelizeiConnectionStatus } from './integrations/demo.js';
+import { bling, fidelizei, getFidelizeiConnectionStatus } from './integrations/live.js';
 import {
   consumeBlingOAuthState,
   createBlingOAuthState,
@@ -43,6 +43,8 @@ const lookupCustomer = async (cpf: string): Promise<Customer> => {
 };
 
 await initializeDatabase();
+void bling.syncProducts().catch(error => app.log.error(error, 'Falha na sincronização inicial do catálogo Bling'));
+setInterval(() => void bling.syncProducts().catch(error => app.log.error(error, 'Falha na sincronização periódica do catálogo Bling')), 15 * 60_000).unref();
 const persist = async (sale: Sale) => {
   sales.set(sale.id, sale);
   if (pool) await pool.query(
@@ -79,6 +81,7 @@ app.get('/integrations/bling/callback', async (req, reply) => {
   const webUrl = process.env.PDV_WEB_URL ?? 'https://pdv-bling-fidelizei-web.onrender.com';
   return reply.redirect(`${webUrl}?integration=bling-connected`);
 });
+app.post('/catalog/products/sync', async () => ({ synced: await bling.syncProducts() }));
 app.get('/catalog/products', async (req) => {
   const query = (req.query as { query?: string }).query ?? '';
   return bling.products(query);
