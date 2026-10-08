@@ -53,6 +53,41 @@ const persist = async (sale: Sale) => {
     [sale.id, sale.status, JSON.stringify(sale)]
   );
 };
+const getSale = async (id: string) => {
+  const cached = sales.get(id);
+  if (cached) return cached;
+  if (!pool) return undefined;
+  const result = await pool.query<{ data: Sale }>('select data from pdv_sales where id = $1', [id]);
+  const sale = result.rows[0]?.data;
+  if (sale) sales.set(sale.id, sale);
+  return sale;
+};
+const reconcileFidelizeiSale = async (sale: Sale) => {
+  if (sale.status !== 'RECONCILIATION_REQUIRED' || !sale.blingOrderId) return;
+  try {
+    const tx = await fidelizei.registerSale({
+      externalSaleId: sale.id,
+      orderNumber: sale.blingOrderId,
+      customerCpf: sale.customer?.cpf,
+      total: sale.total,
+      occurredAt: sale.createdAt
+    });
+    Object.assign(sale, { status: 'COMPLETED', fidelizeiTransactionId: tx.transactionId });
+    await persist(sale);
+    app.log.info({ saleId: sale.id }, 'Venda reconciliada com o Fidelizei');
+  } catch (error) {
+    app.log.warn({ error, saleId: sale.id }, 'Fidelizei indisponível; venda continuará pendente');
+  }
+};
+const reconcilePendingSales = async () => {
+  if (!pool) return;
+  const result = await pool.query<{ data: Sale }>(
+    `select data from pdv_sales where status = 'RECONCILIATION_REQUIRED' order by updated_at asc limit 50`
+  );
+  for (const row of result.rows) await reconcileFidelizeiSale(row.data);
+};
+setInterval(() => void reconcilePendingSales().catch(error => app.log.error(error, 'Falha na rotina de reconciliação Fidelizei')), 60_000).unref();
+void reconcilePendingSales().catch(error => app.log.error(error, 'Falha na reconciliação inicial Fidelizei'));
 
 app.get('/health', async () => ({ ok: true, persistence: pool ? 'postgres' : 'memory' }));
 app.get('/integrations/status', async () => ({
@@ -117,7 +152,7 @@ app.post('/sales', async (req) => {
   return sale;
 });
 app.post('/sales/:id/coupon', async (req) => {
-  const sale = sales.get((req.params as { id: string }).id);
+  const sale = await getSale((req.params as { id: string }).id);
   const { code } = req.body as { code: string };
   const fidelizeiCustomer = sale?.customer?.fidelizei;
   if (!sale || !fidelizeiCustomer) return badRequest('Cliente não cadastrado no Fidelizei');
@@ -131,7 +166,7 @@ app.post('/sales/:id/coupon', async (req) => {
   return sale;
 });
 app.post('/sales/:id/complete', async (req) => {
-  const sale = sales.get((req.params as { id: string }).id);
+  const sale = await getSale((req.params as { id: string }).id);
   const { paymentMethodId } = req.body as { paymentMethodId: string };
   if (!sale || sale.status !== 'OPEN') return badRequest('Venda indisponível para conclusão');
   if (!paymentMethodId) return badRequest('Selecione uma forma de pagamento');
@@ -168,7 +203,7 @@ app.post('/sales/:id/complete', async (req) => {
   return sale;
 });
 app.post('/sales/:id/reverse-fidelizei', async (req) => {
-  const sale = sales.get((req.params as { id: string }).id);
+  const sale = await getSale((req.params as { id: string }).id);
   if (!sale?.fidelizeiTransactionId) return badRequest('Venda sem transação Fidelizei para estorno');
   return fidelizei.reverseSale(sale.id);
 });
