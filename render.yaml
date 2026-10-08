@@ -9,6 +9,22 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: pdv-bling-fidelizei-db
+          property: connectionString
+      - key: CREDENTIALS_ENCRYPTION_KEY
+        generateValue: true
+      - key: BLING_CLIENT_ID
+        sync: false
+      - key: BLING_CLIENT_SECRET
+        sync: false
+      - key: BLING_REDIRECT_URI
+        sync: false
+      - key: FIDELIZEI_API_URL
+        value: https://api.fidelizaplus.com.br/public/v1
+      - key: FIDELIZEI_API_KEY
+        sync: false
 
   - type: web
     name: pdv-bling-fidelizei-web
