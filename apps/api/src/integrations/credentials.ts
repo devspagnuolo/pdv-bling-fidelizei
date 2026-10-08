@@ -103,23 +103,28 @@ export const getBlingAccessToken = async (): Promise<string | undefined> => {
       `select access_token, refresh_token, expires_at
        from integration_credentials where provider = 'BLING'`
     ) as {
-      rows: Array<{
-        access_token: string;
-        refresh_token: string | null;
-        expires_at: Date | null;
-      }>;
+      rows: Array<{ access_token: string; refresh_token: string | null; expires_at: Date | null }>;
     };
     const credential = result.rows[0];
     if (credential) {
-      const expiresAt = credential.expires_at?.getTime() ?? 0;
-      if (expiresAt > Date.now() + 2 * 60_000) return decrypt(credential.access_token);
-      if (!credential.refresh_token) throw new Error('Conexão Bling expirada e sem refresh token');
-      const tokens = await requestTokens(new URLSearchParams({
-        grant_type: 'refresh_token',
-        refresh_token: decrypt(credential.refresh_token)
-      }));
-      await saveBlingTokens(tokens);
-      return tokens.access_token;
+      try {
+        const expiresAt = credential.expires_at?.getTime() ?? 0;
+        if (expiresAt > Date.now() + 2 * 60_000) return decrypt(credential.access_token);
+        if (!credential.refresh_token) throw new Error('Conexão Bling expirada e sem refresh token');
+        const tokens = await requestTokens(new URLSearchParams({
+          grant_type: 'refresh_token',
+          refresh_token: decrypt(credential.refresh_token)
+        }));
+        await saveBlingTokens(tokens);
+        return tokens.access_token;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : '';
+        if (/authenticate data|bad decrypt|invalid/i.test(message)) {
+          await pool.query(`delete from integration_credentials where provider = 'BLING'`);
+          return process.env.BLING_ACCESS_TOKEN;
+        }
+        throw error;
+      }
     }
   }
   return process.env.BLING_ACCESS_TOKEN;
@@ -145,24 +150,12 @@ export const consumeBlingOAuthState = async (state: string) => {
   return Boolean(result.rowCount);
 };
 export const getBlingConnectionStatus = async () => {
-  const oauthConfigured = Boolean(process.env.BLING_CLIENT_ID && process.env.BLING_CLIENT_SECRET);
-  if (pool) {
-    const result = await pool.query(
-      `select expires_at, updated_at from integration_credentials where provider = 'BLING'`
-    ) as { rows: Array<{ expires_at: Date | null; updated_at: Date }> };
-    if (result.rows[0]) {
-      return {
-        configured: oauthConfigured,
-        connected: true,
-        mode: 'oauth' as const,
-        expiresAt: result.rows[0].expires_at?.toISOString(),
-        updatedAt: result.rows[0].updated_at.toISOString()
-      };
-    }
+  const oauthConfigured = Boolean(process.env.BLING_CLIENT_ID && process.env.BLING_CLIENT_SECRET && process.env.BLING_REDIRECT_URI);
+  try {
+    const token = await getBlingAccessToken();
+    if (token) return { configured: oauthConfigured, connected: true, mode: pool ? 'oauth' as const : 'manual-token' as const };
+  } catch {
+    // A interface deve apresentar a reconexão, sem afirmar que um token inválido está ativo.
   }
-  return {
-    configured: oauthConfigured,
-    connected: Boolean(process.env.BLING_ACCESS_TOKEN),
-    mode: process.env.BLING_ACCESS_TOKEN ? 'manual-token' as const : 'demo' as const
-  };
+  return { configured: oauthConfigured, connected: false, mode: 'disconnected' as const };
 };
