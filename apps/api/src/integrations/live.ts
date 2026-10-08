@@ -1,4 +1,4 @@
-import type { BlingCustomer, Coupon, FidelizeiCustomer, PaymentMethod, Product, SaleItem, Seller } from '../domain.js';
+import type { BlingCustomer, Coupon, FidelizeiCustomer, PaymentMethod, PaymentSplit, Product, SaleItem, Seller } from '../domain.js';
 import { pool } from '../db.js';
 import { getBlingAccessToken } from './credentials.js';
 
@@ -154,9 +154,11 @@ const findFinalConsumerId = async () => {
   finalConsumerCache = { expires: Date.now() + 10 * 60_000, id };
   return id;
 };
-const createOrder = async (input: { customerId?: string; sellerId: string; items: SaleItem[]; discount: number; freight: number; observations?: string; paymentMethodId: string; idempotencyKey: string }) => {
+const createOrder = async (input: { customerId?: string; sellerId: string; items: SaleItem[]; discount: number; freight: number; observations?: string; payments: PaymentSplit[]; idempotencyKey: string }) => {
   const customerId = input.customerId ?? await findFinalConsumerId();
   const total = input.items.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0) - input.discount + input.freight;
+  const itemNotes = input.items.filter(item => item.comment?.trim()).map(item => `${item.sku}: ${item.comment?.trim()}`).join(' | ');
+  const orderNotes = [input.observations?.trim(), itemNotes ? `Itens: ${itemNotes}` : undefined].filter(Boolean).join('\n');
   const payload = {
     numeroLoja: input.idempotencyKey,
     contato: { id: Number(customerId) },
@@ -166,13 +168,16 @@ const createOrder = async (input: { customerId?: string; sellerId: string; items
       codigo: item.sku,
       descricao: item.name,
       quantidade: item.quantity,
-      valor: item.unitPrice,
-      observacao: item.comment || undefined
+      valor: item.unitPrice
     })),
     desconto: input.discount ? { valor: input.discount, unidade: 'REAL' } : undefined,
     transporte: input.freight ? { fretePorConta: 0, frete: input.freight } : undefined,
-    observacoes: input.observations || undefined,
-    parcelas: [{ dataVencimento: new Date().toISOString().slice(0, 10), valor: total, formaPagamento: { id: Number(input.paymentMethodId) } }]
+    observacoes: orderNotes || undefined,
+    parcelas: input.payments.map(payment => ({
+      dataVencimento: new Date().toISOString().slice(0, 10),
+      valor: payment.amount,
+      formaPagamento: { id: Number(payment.paymentMethodId) }
+    }))
   };
   const response = await blingRequest('/pedidos/vendas', { method: 'POST', body: JSON.stringify(payload), headers: { 'Idempotency-Key': input.idempotencyKey } });
   const body = await response.json() as { data?: { id?: string | number }; error?: unknown; message?: string; retorno?: unknown };

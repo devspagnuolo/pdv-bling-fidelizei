@@ -9,7 +9,7 @@ import {
   getBlingConnectionStatus
 } from './integrations/credentials.js';
 import { initializeDatabase, pool } from './db.js';
-import { money, type Customer, type Sale, type SaleItem } from './domain.js';
+import { money, type Customer, type PaymentSplit, type Sale, type SaleItem } from './domain.js';
 
 const app = Fastify({ logger: true });
 await app.register(cors, { origin: true });
@@ -161,8 +161,8 @@ app.post('/sales', async (req) => {
     items: body.items,
     manualDiscount,
     observations: body.observations?.trim() || undefined,
-    emitFiscal: body.emitFiscal !== false,
-    fiscalStatus: body.emitFiscal === false ? 'NOT_REQUESTED' : undefined,
+    emitFiscal: body.emitFiscal === true,
+    fiscalStatus: body.emitFiscal === true ? undefined : 'NOT_REQUESTED',
     ...amounts,
     createdAt: new Date().toISOString()
   };
@@ -185,14 +185,49 @@ app.post('/sales/:id/coupon', async (req) => {
 });
 app.post('/sales/:id/complete', async (req) => {
   const sale = await getSale((req.params as { id: string }).id);
-  const { paymentMethodId } = req.body as { paymentMethodId: string };
+  const body = req.body as { paymentMethodId?: string; payments?: PaymentSplit[] };
   if (!sale || sale.status !== 'OPEN') return badRequest('Venda indisponível para conclusão');
-  if (!paymentMethodId) return badRequest('Selecione uma forma de pagamento');
 
-  const paymentMethod = (await bling.paymentMethods()).find(method => method.id === paymentMethodId && method.active);
-  if (!paymentMethod) return badRequest('Forma de pagamento não encontrada ou inativa no Bling');
+  const requested = Array.isArray(body.payments) && body.payments.length
+    ? body.payments
+    : body.paymentMethodId
+      ? [{ paymentMethodId: body.paymentMethodId, amount: sale.total }]
+      : [];
+  if (!requested.length) return badRequest('Adicione ao menos uma forma de pagamento');
 
-  Object.assign(sale, { paymentMethodId: paymentMethod.id, paymentMethodName: paymentMethod.name });
+  const availableMethods = await bling.paymentMethods();
+  const payments = requested.map(input => {
+    const method = availableMethods.find(item => item.id === input.paymentMethodId && item.active);
+    if (!method) return badRequest('Uma forma de pagamento não foi encontrada ou está inativa no Bling');
+    const amount = money(Number(input.amount));
+    if (!(amount > 0)) return badRequest('Informe um valor válido para cada forma de pagamento');
+    const isCash = /dinheiro|cash/i.test(`${method.name} ${method.type}`);
+    const receivedAmount = input.receivedAmount === undefined ? undefined : money(Number(input.receivedAmount));
+    if (isCash && receivedAmount !== undefined && receivedAmount < amount) {
+      return badRequest('O valor recebido em dinheiro não pode ser menor que a parte paga em dinheiro');
+    }
+    return {
+      paymentMethodId: method.id,
+      paymentMethodName: method.name,
+      amount,
+      receivedAmount,
+      change: isCash && receivedAmount !== undefined ? money(Math.max(0, receivedAmount - amount)) : 0
+    };
+  });
+  const paidTotal = money(payments.reduce((sum, payment) => sum + payment.amount, 0));
+  if (Math.abs(paidTotal - sale.total) > 0.009) {
+    return badRequest(`A soma dos pagamentos (${paidTotal.toFixed(2)}) deve ser igual ao total da venda (${sale.total.toFixed(2)})`);
+  }
+
+  const totalReceived = money(payments.reduce((sum, payment) => sum + (payment.receivedAmount ?? payment.amount), 0));
+  const totalChange = money(payments.reduce((sum, payment) => sum + (payment.change ?? 0), 0));
+  Object.assign(sale, {
+    paymentMethodId: payments.length === 1 ? payments[0].paymentMethodId : undefined,
+    paymentMethodName: payments.length === 1 ? payments[0].paymentMethodName : 'Pagamento combinado',
+    payments,
+    amountReceived: totalReceived,
+    change: totalChange
+  });
   const order = await bling.createOrder({
     customerId: sale.customer?.bling?.id,
     sellerId: sale.sellerId,
@@ -200,7 +235,7 @@ app.post('/sales/:id/complete', async (req) => {
     discount: sale.discount,
     freight: sale.freight ?? 0,
     observations: sale.observations,
-    paymentMethodId: paymentMethod.id,
+    payments,
     idempotencyKey: sale.id
   });
   if (sale.emitFiscal) {
@@ -230,6 +265,21 @@ app.post('/sales/:id/complete', async (req) => {
   }
   await persist(sale);
   return sale;
+});
+app.get('/sales/recent', async (req) => {
+  const rawLimit = Number((req.query as { limit?: string }).limit ?? 10);
+  const limit = Math.max(1, Math.min(30, Number.isFinite(rawLimit) ? rawLimit : 10));
+  if (pool) {
+    const result = await pool.query(
+      `select data from pdv_sales where status in ('COMPLETED','RECONCILIATION_REQUIRED') order by updated_at desc limit $1`,
+      [limit]
+    ) as { rows: { data: Sale }[] };
+    return result.rows.map(row => row.data);
+  }
+  return [...sales.values()]
+    .filter(item => item.status !== 'OPEN')
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    .slice(0, limit);
 });
 app.post('/sales/:id/reverse-fidelizei', async (req) => {
   const sale = await getSale((req.params as { id: string }).id);

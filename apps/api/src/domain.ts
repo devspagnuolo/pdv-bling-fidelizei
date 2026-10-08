@@ -35,6 +35,7 @@ export type Customer = {
   systems: { bling: LookupStatus; fidelizei: LookupStatus };
 };
 export type SaleItem = { productId: string; sku: string; name: string; quantity: number; unitPrice: number; comment?: string };
+export type PaymentSplit = { paymentMethodId: string; paymentMethodName?: string; amount: number; receivedAmount?: number; change?: number };
 export type Sale = {
   id: string;
   status: 'OPEN' | 'COMPLETED' | 'RECONCILIATION_REQUIRED';
@@ -46,6 +47,9 @@ export type Sale = {
   reservationId?: string;
   paymentMethodId?: string;
   paymentMethodName?: string;
+  payments?: PaymentSplit[];
+  amountReceived?: number;
+  change?: number;
   subtotal: number;
   discount: number;
   manualDiscount?: number;
