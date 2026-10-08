@@ -62,6 +62,8 @@ function App() {
   const [searchingCatalog, setSearchingCatalog] = useState(false);
   const [seller, setSeller] = useState('');
   const [cpf, setCpf] = useState('');
+  const [fidelizeiPhone, setFidelizeiPhone] = useState('');
+  const [programConsent, setProgramConsent] = useState(false);
   const [customer, setCustomer] = useState<CustomerLookup>();
   const [coupon, setCoupon] = useState('');
   const [sale, setSale] = useState<any>();
@@ -111,6 +113,10 @@ function App() {
   const loyaltyCustomer = customer?.fidelizei;
 
   const changeCart = (next: Item[]) => {
+    if (sale?.coupon) {
+      setMessage('O cupom Fidelizei já foi consumido. Finalize esta venda antes de alterar os itens.');
+      return;
+    }
     setItems(next);
     setSale(undefined);
     setMessage('');
@@ -154,6 +160,7 @@ function App() {
     const data = await r.json().catch(() => undefined);
     if (!r.ok) return setMessage(data?.message ?? 'Não foi possível consultar o cliente.');
     setCustomer(data);
+    if (data.bling?.phone) setFidelizeiPhone(data.bling.phone);
     if (!data.found) {
       const unavailable = Object.values(data.systems).includes('UNAVAILABLE');
       return setMessage(unavailable
@@ -171,11 +178,34 @@ function App() {
     setProducts([]);
     setCatalogSearchActive(false);
     setCpf('');
+    setFidelizeiPhone('');
+    setProgramConsent(false);
     setCustomer(undefined);
     setCoupon('');
     setSale(undefined);
     setMessage('');
     searchInputRef.current?.focus();
+  };
+
+  const enrollFidelizei = async () => {
+    if (!customer?.bling || !programConsent) return;
+    setMessage('');
+    const response = await fetch(`${api}/customers/fidelizei`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        name: customer.bling.name,
+        cpf: customer.cpf,
+        phone: fidelizeiPhone,
+        email: customer.bling.email,
+        programConsent: true
+      })
+    });
+    const data = await response.json().catch(() => undefined);
+    if (!response.ok) return setMessage(data?.message ?? 'Não foi possível cadastrar a cliente no Fidelizei.');
+    await lookup();
+    setProgramConsent(false);
+    setMessage('Adesão ao Fidelizei registrada com consentimento.');
   };
 
   const create = async () => {
@@ -211,7 +241,7 @@ function App() {
     const data = await r.json();
     if (!r.ok) return setMessage(data.message);
     setSale(data);
-    setMessage('Cupom validado e reservado por 10 minutos.');
+    setMessage('Cupom Fidelizei consumido e aplicado à venda.');
   };
   const complete = async () => {
     const activeSale = sale ?? await create();
@@ -302,12 +332,17 @@ function App() {
                 <b>{loyaltyCustomer.points} pontos disponíveis</b>
                 <div className="benefits">{loyaltyCustomer.benefits.map(benefit => <span key={benefit}>✓ {benefit}</span>)}</div>
               </> : <>
-                <b>Sem cadastro de fidelidade</b>
-                <p>A venda pode continuar normalmente. Pontos, benefícios e cupons não serão aplicados.</p>
+                <b>Sem cadastro no Fidelizei</b>
+                <p>A venda pode continuar sem pontuação. A adesão exige consentimento explícito da cliente.</p>
+                {customer.bling && <div className="enrollment-box">
+                  <input value={fidelizeiPhone} onChange={e => setFidelizeiPhone(e.target.value)} placeholder="Celular com DDD" />
+                  <label className="consent-check"><input type="checkbox" checked={programConsent} onChange={e => setProgramConsent(e.target.checked)} /><span>A cliente aceita participar do programa Fidelizei.</span></label>
+                  <button disabled={!programConsent || !fidelizeiPhone} onClick={() => void enrollFidelizei()}>Cadastrar no Fidelizei</button>
+                </div>}
               </>}
             </div>
           </div> : <div className="empty-state">Informe o CPF para consultar simultaneamente o Bling e o Fidelizei.</div>}
-          <label>Cupom Fidelizei<div className="row"><input disabled={!loyaltyCustomer} value={coupon} onChange={e => setCoupon(e.target.value.toUpperCase())} placeholder={loyaltyCustomer ? 'Digite o código do cupom' : 'Disponível para clientes Fidelizei'} /><button disabled={!loyaltyCustomer || !coupon} onClick={applyCoupon}>Validar</button></div></label>
+          <label>Cupom Fidelizei<div className="row"><input disabled={!loyaltyCustomer} value={coupon} onChange={e => setCoupon(e.target.value.toUpperCase())} placeholder={loyaltyCustomer ? 'Digite o código do cupom' : 'Disponível para clientes Fidelizei'} /><button disabled={!loyaltyCustomer || !coupon} onClick={applyCoupon}>Aplicar cupom</button></div></label>
           <div className="nav-actions"><button className="secondary" onClick={() => setStep('product')}>Voltar</button><button className="next" disabled={!customer?.found} onClick={() => setStep('payment')}>Continuar para pagamento</button></div>
         </>}
 
