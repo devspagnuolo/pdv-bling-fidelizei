@@ -1,4 +1,4 @@
-import { StrictMode, useEffect, useMemo, useState } from 'react';
+import { StrictMode, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import './styles.css';
 
@@ -67,6 +67,16 @@ function App() {
   const [sale, setSale] = useState<any>();
   const [paymentMethodId, setPaymentMethodId] = useState('');
   const [message, setMessage] = useState('');
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    const onShortcut = (event: KeyboardEvent) => {
+      if (event.key === 'F2') { event.preventDefault(); searchInputRef.current?.focus(); }
+      if (event.key === 'F10') { event.preventDefault(); setStep('payment'); }
+    };
+    window.addEventListener('keydown', onShortcut);
+    return () => window.removeEventListener('keydown', onShortcut);
+  }, []);
 
   useEffect(() => {
     const load = async <T,>(path: string): Promise<T> => {
@@ -206,8 +216,8 @@ function App() {
 
   return <main>
     <header>
-      <div><small>PDV INDEPENDENTE</small><h1>Venda</h1></div>
-      <div className="header-actions"><span>Operador: Caixa Demo</span><button className="secondary">Nova venda</button></div>
+      <div><small>PDV INDEPENDENTE · CAIXA 01</small><h1>Venda</h1></div>
+      <div className="header-actions"><span>Operador: Juliana S. · Caixa aberto</span><span className="status-pill online">Bling online</span><span className="status-pill online">Fideliza+ online</span><button className="secondary">Nova venda</button></div>
     </header>
 
     <section className="integration-strip" aria-label="Status das integrações">
@@ -234,7 +244,7 @@ function App() {
         {step === 'product' && <>
           <div className="section-title"><div><small>ETAPA 1</small><h2>Adicionar produtos</h2></div><span>Busca direta no Bling</span></div>
           <div className="catalog-search">
-            <input className="search" value={query} onChange={e => { setQuery(e.target.value); setCatalogSearchActive(false); }} onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); void searchCatalog(); } }} placeholder="Bipe o código de barras ou pesquise SKU / produto" autoFocus />
+            <input ref={searchInputRef} id="product-search" className="search" value={query} onChange={e => { setQuery(e.target.value); setCatalogSearchActive(false); }} onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); void searchCatalog(); } }} placeholder="Bipe o código de barras ou pesquise SKU / produto" autoFocus />
             <button className="search-action" onClick={() => void searchCatalog()} disabled={searchingCatalog}>{searchingCatalog ? 'Buscando…' : 'Buscar'}</button>
           </div>
           <p className="scanner-hint">Leitor de código de barras conectado? Basta bipar e pressionar Enter.</p>
