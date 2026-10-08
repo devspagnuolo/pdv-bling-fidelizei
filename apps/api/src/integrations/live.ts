@@ -160,57 +160,73 @@ const createOrder = async (input: { customerId?: string; sellerId: string; items
 };
 
 const fidelizeiConfig = () => {
-  const url = process.env.FIDELIZEI_API_URL?.replace(/\/$/, '');
+  const url = (process.env.FIDELIZEI_API_URL ?? 'https://api.fidelizaplus.com.br/public/v1').replace(/\/$/, '');
   const key = process.env.FIDELIZEI_API_KEY;
-  if (!url || !key) throw new Error('Fidelizei não configurado');
+  if (!key) throw new Error('FIDELIZEI_API_KEY não configurada');
   return { url, key };
 };
-const fidelizeiRequest = async (path: string, init: RequestInit = {}) => {
+const fidelizeiFetch = async (path: string, init: RequestInit = {}) => {
   const { url, key } = fidelizeiConfig();
-  const response = await fetch(`${url}${path}`, {
-    ...init,
-    headers: { Authorization: `Bearer ${key}`, 'x-api-key': key, Accept: 'application/json', 'Content-Type': 'application/json', ...(init.headers ?? {}) }
-  });
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`Fidelizei não respondeu à operação (HTTP ${response.status})${body ? `: ${body.slice(0, 160)}` : ''}`);
+  let response: Response | undefined;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    response = await fetch(`${url}${path}`, {
+      ...init,
+      headers: {
+        Authorization: `Bearer ${key}`,
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        ...(init.headers ?? {})
+      }
+    });
+    if (response.status !== 429 && response.status < 500) return response;
+    await delay(700 * 2 ** attempt);
   }
-  return response;
+  return response as Response;
 };
-const unwrap = (payload: unknown) => {
-  const body = payload as { data?: unknown };
-  return body?.data ?? payload;
+const fidelizeiError = async (response: Response, operation: string): Promise<never> => {
+  const detail = await response.text();
+  const guidance: Record<number, string> = {
+    400: 'dados inválidos',
+    401: 'chave inválida, vencida ou revogada',
+    403: 'escopo ou plano não liberado',
+    404: 'registro não pertence à loja ou não existe',
+    409: 'conflito ou operação já utilizada',
+    429: 'limite temporário de requisições atingido'
+  };
+  throw new Error(`Fidelizei: ${operation} falhou — ${guidance[response.status] ?? `HTTP ${response.status}`}${detail ? `: ${detail.slice(0, 180)}` : ''}`);
 };
+const unwrap = (payload: unknown) => (payload as { data?: unknown })?.data ?? payload;
 const mapFidelizeiCustomer = (payload: unknown, cpf: string): FidelizeiCustomer | undefined => {
   const raw = unwrap(payload) as Record<string, unknown> | undefined;
   if (!raw || Array.isArray(raw)) return undefined;
-  const id = textValue(raw.id ?? raw.customerId ?? raw.customer_id);
-  const name = textValue(raw.name ?? raw.nome);
+  const id = textValue(raw.id);
+  const name = textValue(raw.name);
   if (!id || !name) return undefined;
-  const couponsRaw = Array.isArray(raw.coupons ?? raw.cupons) ? (raw.coupons ?? raw.cupons) as Record<string, unknown>[] : [];
+  const eligible = raw.eligibleForPoints === true;
   return {
     id,
     cpf,
     name,
-    tier: textValue(raw.tier ?? raw.category ?? raw.categoria) ?? 'Sem categoria',
-    points: numericValue(raw.points ?? raw.pontos ?? raw.saldo),
-    benefits: Array.isArray(raw.benefits ?? raw.beneficios) ? (raw.benefits ?? raw.beneficios) as string[] : [],
-    coupons: couponsRaw.map(item => ({
-      id: textValue(item.id) ?? '',
-      code: textValue(item.code ?? item.codigo) ?? '',
-      description: textValue(item.description ?? item.descricao) ?? '',
-      discount: numericValue(item.discount ?? item.desconto ?? item.valor)
-    })).filter(item => item.id && item.code)
+    tier: eligible ? 'Participante' : 'Adesão pendente',
+    points: numericValue(raw.pointsBalance),
+    benefits: eligible ? ['Elegível para pontuação'] : [],
+    coupons: []
   };
 };
 
 export const getFidelizeiConnectionStatus = async () => {
+  const configured = Boolean(process.env.FIDELIZEI_API_KEY);
+  if (!configured) return { configured: false, connected: false, mode: 'api-key' as const };
   try {
-    fidelizeiConfig();
-    const response = await fidelizeiRequest('/ready');
-    return { configured: true, connected: response.ok, mode: 'api-key' as const };
+    const response = await fidelizeiFetch('/customers/lookup?cpf=00000000000');
+    return {
+      configured: true,
+      connected: response.status === 200 || response.status === 400 || response.status === 404,
+      mode: 'api-key' as const,
+      statusCode: response.status
+    };
   } catch (error) {
-    return { configured: Boolean(process.env.FIDELIZEI_API_URL && process.env.FIDELIZEI_API_KEY), connected: false, mode: 'api-key' as const, error: error instanceof Error ? error.message : 'Falha de conexão' };
+    return { configured: true, connected: false, mode: 'api-key' as const, error: error instanceof Error ? error.message : 'Falha de conexão' };
   }
 };
 
@@ -218,27 +234,66 @@ export const bling = { products: searchProducts, syncProducts, sellers: fetchSel
 export const fidelizei = {
   findCustomer: async (cpf: string) => {
     const normalized = cpf.replace(/\D/g, '');
-    const response = await fidelizeiRequest(`/customers?cpf=${encodeURIComponent(normalized)}`);
+    const response = await fidelizeiFetch(`/customers/lookup?cpf=${encodeURIComponent(normalized)}`);
+    if (response.status === 404) return undefined;
+    if (!response.ok) return fidelizeiError(response, 'consulta de cliente');
     return mapFidelizeiCustomer(await response.json(), normalized);
   },
-  validateAndReserve: async (code: string, customerId: string, subtotal: number) => {
-    const response = await fidelizeiRequest('/coupons/reserve', { method: 'POST', body: JSON.stringify({ code, customerId, subtotal }) });
+  upsertCustomer: async (input: { name: string; cpf: string; phone?: string; email?: string; programConsent: boolean }) => {
+    const response = await fidelizeiFetch('/customers/upsert', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: input.name,
+        cpf: input.cpf.replace(/\D/g, ''),
+        phone: input.phone?.replace(/\D/g, ''),
+        email: input.email,
+        programConsent: input.programConsent
+      })
+    });
+    if (!response.ok) return fidelizeiError(response, 'cadastro da cliente');
+    return mapFidelizeiCustomer(await response.json(), input.cpf.replace(/\D/g, ''));
+  },
+  validateAndReserve: async (code: string, orderNumber: string, subtotal: number) => {
+    const response = await fidelizeiFetch('/redemptions/consume', {
+      method: 'POST',
+      body: JSON.stringify({ code: code.trim().toUpperCase(), orderNumber })
+    });
+    if (!response.ok) return fidelizeiError(response, 'consumo do cupom');
     const data = unwrap(await response.json()) as Record<string, unknown>;
-    const couponRaw = (data.coupon ?? data.cupom) as Record<string, unknown>;
+    const reward = data.reward as Record<string, unknown>;
+    const minimumOrderCents = numericValue(reward.minimumOrderCents);
+    if (Math.round(subtotal * 100) < minimumOrderCents) throw new Error('Fidelizei: pedido abaixo do valor mínimo do cupom');
+    const discountType = textValue(reward.discountType);
+    const discountValue = numericValue(reward.discountValue);
+    const discount = discountType === 'percent'
+      ? Math.round(subtotal * discountValue) / 100
+      : discountValue / 100;
     const coupon: Coupon = {
-      id: textValue(couponRaw.id) ?? '',
-      code: textValue(couponRaw.code ?? couponRaw.codigo) ?? code,
-      description: textValue(couponRaw.description ?? couponRaw.descricao) ?? 'Benefício Fidelizei',
-      discount: numericValue(couponRaw.discount ?? couponRaw.desconto ?? couponRaw.valor)
+      id: code.trim().toUpperCase(),
+      code: code.trim().toUpperCase(),
+      description: textValue(reward.name) ?? 'Cupom Fidelizei',
+      discount: Math.min(subtotal, discount)
     };
-    return { coupon, reservationId: textValue(data.reservationId ?? data.reservation_id) ?? '', expiresAt: textValue(data.expiresAt ?? data.expires_at) ?? '' };
+    return { coupon, reservationId: `consumed:${coupon.code}`, expiresAt: new Date().toISOString() };
   },
-  consumeReservation: async (reservationId: string, saleId: string) => {
-    const response = await fidelizeiRequest('/coupons/consume', { method: 'POST', body: JSON.stringify({ reservationId, saleId }) });
+  registerSale: async (input: { externalSaleId: string; orderNumber: string; customerCpf?: string; total: number; occurredAt: string }) => {
+    const response = await fidelizeiFetch('/sales', {
+      method: 'POST',
+      body: JSON.stringify({
+        externalSaleId: input.externalSaleId,
+        orderNumber: input.orderNumber,
+        customerCpf: input.customerCpf?.replace(/\D/g, '') || undefined,
+        totalCents: Math.round(input.total * 100),
+        occurredAt: input.occurredAt
+      })
+    });
+    if (!response.ok) return fidelizeiError(response, 'registro da venda');
     const data = unwrap(await response.json()) as Record<string, unknown>;
-    return { transactionId: textValue(data.transactionId ?? data.transaction_id) ?? '', reservationId };
+    return { transactionId: textValue(data.id ?? data.externalId) ?? input.externalSaleId, idempotent: data.idempotent === true };
   },
-  releaseReservation: async (reservationId: string) => {
-    await fidelizeiRequest('/coupons/release', { method: 'POST', body: JSON.stringify({ reservationId }) });
+  reverseSale: async (externalSaleId: string) => {
+    const response = await fidelizeiFetch(`/sales/${encodeURIComponent(externalSaleId)}/reverse`, { method: 'POST' });
+    if (!response.ok) return fidelizeiError(response, 'estorno da venda');
+    return unwrap(await response.json());
   }
 };
