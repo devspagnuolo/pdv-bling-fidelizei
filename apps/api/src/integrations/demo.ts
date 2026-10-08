@@ -122,6 +122,7 @@ const normalizeProduct = (raw: Record<string, unknown>): Product | undefined => 
     barcode: valueAsText(raw.gtin ?? raw.gtinPrincipal)
   };
 };
+const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const fetchProducts = async (query = ''): Promise<Product[]> => {
   const normalizedQuery = query.trim();
   const accessToken = await getBlingAccessToken();
@@ -132,33 +133,41 @@ const fetchProducts = async (query = ''): Promise<Product[]> => {
   const cached = productCache.get(normalizedQuery);
   if (cached && cached.expiresAt > Date.now()) return cached.data;
 
+  const isBarcode = /^\d{8,14}$/.test(normalizedQuery);
+  const isExactCode = Boolean(normalizedQuery) && /^[A-Za-z0-9._/-]+$/.test(normalizedQuery) && !isBarcode;
   const result: Product[] = [];
-  const isBarcode = /^\\d{8,14}$/.test(normalizedQuery);
-  // O Bling pagina as respostas em blocos de até 100. Percorremos todas as páginas
-  // para que uma busca não fique restrita aos primeiros produtos do cadastro.
-  for (let page = 1; page <= (isBarcode ? 10 : 1); page += 1) {
+
+  // Para SKU/código, a API do Bling não garante a localização pela pesquisa textual.
+  // Portanto, percorremos o catálogo até a correspondência exata, com cadência segura.
+  for (let page = 1; page <= (isExactCode ? 250 : isBarcode ? 10 : 1); page += 1) {
     const url = new URL(`${BLING_API_URL}/produtos`);
     url.searchParams.set('pagina', String(page));
     url.searchParams.set('limite', '100');
-    if (normalizedQuery) {
+    if (normalizedQuery && !isExactCode) {
       if (isBarcode) url.searchParams.append('gtins[]', normalizedQuery);
       else url.searchParams.set('pesquisa', normalizedQuery);
     }
-    const response = await fetch(url, {
-      headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json', 'enable-jwt': '1' }
-    });
-    if (response.status === 429) {
-      await new Promise(resolve => setTimeout(resolve, 1200));
-      continue;
+
+    let response: Response | undefined;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      response = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json', 'enable-jwt': '1' } });
+      if (response.status !== 429) break;
+      await delay(1100 * (attempt + 1));
     }
-    if (!response.ok) throw new Error(`Bling não retornou os produtos (HTTP ${response.status})`);
+    if (!response || !response.ok) throw new Error(`Bling não retornou os produtos (HTTP ${response?.status ?? 0})`);
+
     const payload = await response.json() as { data?: unknown };
     const rows = Array.isArray(payload.data) ? payload.data : [];
-    result.push(...rows
+    const pageProducts = rows
       .filter((row): row is Record<string, unknown> => Boolean(row) && typeof row === 'object')
       .map(normalizeProduct)
-      .filter((product): product is Product => Boolean(product)));
-    if (rows.length < 100 || isBarcode) break;
+      .filter((product): product is Product => Boolean(product));
+    const found = isExactCode
+      ? pageProducts.filter(product => [product.id, product.sku, product.barcode].some(value => value?.toLowerCase() === normalizedQuery.toLowerCase()))
+      : pageProducts;
+    result.push(...found);
+    if (found.length || rows.length < 100 || isBarcode) break;
+    await delay(650);
   }
   productCache.set(normalizedQuery, { expiresAt: Date.now() + 60_000, data: result });
   return result;
@@ -220,16 +229,26 @@ export const bling = {
   }) => ({ id: `bling-order-${input.idempotencyKey}`, status: 'CONFIRMED' as const })
 };
 export const getFidelizeiConnectionStatus = async () => {
-  const baseUrl = process.env.FIDELIZAPLUS_API_URL?.replace(/\/$/, '');
-  const token = process.env.FIDELIZAPLUS_API_TOKEN;
-  if (!baseUrl || !token) return { configured: false, connected: false, mode: 'demo' as const };
+  const baseUrl = (process.env.FIDELIZI_API_URL ?? process.env.FIDELIZEI_API_URL ?? process.env.FIDELIZAPLUS_API_URL ?? 'https://integracao.fidelizii.com.br/api/v3').replace(/\/$/, '');
+  const appToken = process.env.FIDELIZI_APP_TOKEN ?? process.env.FIDELIZEI_APP_TOKEN ?? process.env.FIDELIZAPLUS_APP_TOKEN;
+  const accessToken = process.env.FIDELIZI_ACCESS_TOKEN ?? process.env.FIDELIZEI_ACCESS_TOKEN ?? process.env.FIDELIZAPLUS_ACCESS_TOKEN;
+  const bearerToken = process.env.FIDELIZAPLUS_API_TOKEN;
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (appToken && accessToken) {
+    headers['app-token'] = appToken;
+    headers['access-token'] = accessToken;
+  } else if (bearerToken) {
+    headers.Authorization = `Bearer ${bearerToken}`;
+  } else {
+    return { configured: false, connected: false, mode: 'demo' as const };
+  }
+
   try {
-    const response = await fetch(`${baseUrl}/ready`, {
-      headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' }
-    });
-    return { configured: true, connected: response.ok, mode: 'api-token' as const, statusCode: response.status };
+    const endpoint = appToken && accessToken ? `${baseUrl}/estabelecimentos` : `${baseUrl}/ready`;
+    const response = await fetch(endpoint, { headers });
+    return { configured: true, connected: response.ok, mode: appToken ? 'fidelizi-tokens' as const : 'api-token' as const, statusCode: response.status };
   } catch {
-    return { configured: true, connected: false, mode: 'api-token' as const };
+    return { configured: true, connected: false, mode: appToken ? 'fidelizi-tokens' as const : 'api-token' as const };
   }
 };
 
