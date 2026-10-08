@@ -47,7 +47,10 @@ type CashDay = {
   salesTotal: number;
   paymentTotals: { name: string; amount: number }[];
   blingEntries: { id: string; direction: string; amount: number; description: string; accountName?: string }[];
-  operations: { id: string; type: string; amount: number; createdAt: string; data?: { notes?: string } }[];
+  operations: { id: string; type: string; amount: number; createdAt: string; data?: { notes?: string; syncStatus?: string; lastError?: string } }[];
+  expectedCash: number;
+  pendingSales: number;
+  canClose?: boolean;
 };
 type OperationModal = 'open' | 'withdrawal' | 'supply' | 'close' | 'return';
 type Step = 'product' | 'customer' | 'payment';
@@ -94,6 +97,7 @@ function App() {
   const [dayHistory, setDayHistory] = useState<CashDay>();
   const [countedValues, setCountedValues] = useState<Record<string, string>>({});
   const [operationBusy, setOperationBusy] = useState(false);
+  const [completing, setCompleting] = useState(false);
   const [recentSales, setRecentSales] = useState<any[]>([]);
   const [receipt, setReceipt] = useState<any>();
   const [discountMode, setDiscountMode] = useState<'value' | 'percent'>('value');
@@ -324,10 +328,15 @@ function App() {
   };
 
   const create = async () => {
+    if (!cashSession) {
+      setMessage('Abra o caixa antes de iniciar a venda.');
+      return;
+    }
     const r = await fetch(`${api}/sales`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
+        cashSessionId: cashSession.id,
         operatorId: seller,
         sellerId: seller,
         customerCpf: customer?.found ? customer.cpf : undefined,
@@ -364,26 +373,33 @@ function App() {
     setMessage('Cupom Fidelizei consumido e aplicado à venda.');
   };
   const complete = async () => {
-    const activeSale = sale ?? await create();
-    if (!activeSale) return;
-    const r = await fetch(`${api}/sales/${activeSale.id}/complete`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        payments: payments.map(payment => ({
-          paymentMethodId: payment.paymentMethodId,
-          amount: numberValue(payment.amount),
-          receivedAmount: isCashMethod(payment.paymentMethodId) ? numberValue(payment.receivedAmount) : undefined
-        }))
-      })
-    });
-    const data = await r.json();
-    if (!r.ok) return setMessage(data.message ?? 'Não foi possível concluir a venda.');
-    setSale(data);
-    if (!emitFiscal) setReceipt(data);
-    setMessage(data.status === 'COMPLETED'
-      ? `Venda concluída. Pedido Bling: ${data.blingOrderId}${data.fiscalStatus === 'REQUESTED' ? ' · NFC-e solicitada ao Bling.' : data.fiscalStatus === 'FAILED' ? ' · Pedido salvo, mas a NFC-e precisa ser verificada no Bling.' : ' · Comprovante não fiscal disponível para impressão.'}`
-      : 'Pedido criado; a fidelidade exige reconciliação automática.');
+    if (completing) return;
+    if (!cashSession) return setMessage('Abra o caixa antes de finalizar a venda.');
+    setCompleting(true);
+    try {
+      const activeSale = sale ?? await create();
+      if (!activeSale) return;
+      const r = await fetch(`${api}/sales/${activeSale.id}/complete`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          payments: payments.map(payment => ({
+            paymentMethodId: payment.paymentMethodId,
+            amount: numberValue(payment.amount),
+            receivedAmount: isCashMethod(payment.paymentMethodId) ? numberValue(payment.receivedAmount) : undefined
+          }))
+        })
+      });
+      const data = await r.json();
+      if (!r.ok) return setMessage(data.message ?? 'Não foi possível concluir a venda.');
+      setSale(data);
+      if (!emitFiscal) setReceipt(data);
+      setMessage(data.status === 'COMPLETED'
+        ? `Venda concluída. Pedido Bling: ${data.blingOrderId}${data.fiscalStatus === 'REQUESTED' ? ' · NFC-e solicitada ao Bling.' : data.fiscalStatus === 'FAILED' ? ' · Pedido salvo, mas a NFC-e precisa ser verificada no Bling.' : ' · Comprovante não fiscal disponível para impressão.'}`
+        : 'Pedido criado; a fidelidade exige reconciliação automática.');
+    } finally {
+      setCompleting(false);
+    }
   };
 
   const printReceipt = (data: any = receipt ?? sale) => {
@@ -415,8 +431,12 @@ function App() {
       const response = await fetch(`${api}/cash/day?date=${new Date().toLocaleDateString('sv-SE')}&accountId=${encodeURIComponent(cashSession.accountId)}&sessionId=${encodeURIComponent(cashSession.id)}`);
       const data = await response.json();
       if (!response.ok) throw new Error(data.message ?? 'Não foi possível consultar o movimento do dia no Bling.');
-      setDayHistory(data);
-      setCountedValues(Object.fromEntries(data.paymentTotals.map((item: { name: string; amount: number }) => [item.name, item.amount.toFixed(2)])));
+      const paymentTotals = [...data.paymentTotals];
+      if (!paymentTotals.some((item: { name: string }) => /dinheiro|cash/i.test(item.name))) {
+        paymentTotals.push({ name: 'Dinheiro', amount: data.expectedCash });
+      }
+      setDayHistory({ ...data, paymentTotals });
+      setCountedValues({});
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Falha ao consultar o movimento do dia.');
       setOperationModal(undefined);
@@ -456,7 +476,7 @@ function App() {
     try {
       const response = await fetch(`${api}/cash/entries`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ sessionId: cashSession.id, type, amount: numberValue(operationAmount), notes: operationNotes })
+        body: JSON.stringify({ operationId: newPaymentKey(), sessionId: cashSession.id, type, amount: numberValue(operationAmount), notes: operationNotes })
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.message ?? 'Não foi possível registrar a operação.');
@@ -662,7 +682,7 @@ function App() {
             <span>Pagamento <b>{paymentsValid ? payments.length > 1 ? `${payments.length} formas` : paymentMethods.find(item => item.id === payments[0]?.paymentMethodId)?.name : 'Distribua o total'}</b></span>
             <span>Vendedor <b>{sellers.find(item => item.id === seller)?.name ?? 'Selecione'}</b></span>
           </div>
-          <div className="nav-actions"><button className="secondary" onClick={() => setStep('customer')}>Voltar</button><button className="finish" disabled={!items.length || !seller || !paymentsValid} onClick={complete}>Finalizar venda · {brl.format(total)}</button></div>
+          <div className="nav-actions"><button className="secondary" onClick={() => setStep('customer')}>Voltar</button><button className="finish" disabled={!cashSession || completing || !items.length || !seller || !paymentsValid} onClick={complete}>{completing ? 'Finalizando no Bling…' : `Finalizar venda · ${brl.format(total)}`}</button></div>
         </>}
         {message && <p className={sale?.status === 'COMPLETED' ? 'message success' : 'message'}>{message}</p>}
       </article>
@@ -681,7 +701,7 @@ function App() {
           <div className="cart-total"><span>Total</span><strong>{brl.format(total)}</strong></div>
           {step === 'product' && <button className="cart-primary" disabled={!items.length} onClick={() => setStep('customer')}>Identificar cliente <kbd>F4</kbd></button>}
           {step === 'customer' && <button className="cart-primary" disabled={!items.length} onClick={() => setStep('payment')}>Ir para pagamento <kbd>F10</kbd></button>}
-          {step === 'payment' && <button className="cart-primary" disabled={!items.length || !seller || !paymentsValid} onClick={complete}>Finalizar · {brl.format(total)}</button>}
+          {step === 'payment' && <button className="cart-primary" disabled={!cashSession || completing || !items.length || !seller || !paymentsValid} onClick={complete}>{completing ? 'Finalizando…' : `Finalizar · ${brl.format(total)}`}</button>}
         </div>
       </aside>
     </section>
@@ -711,16 +731,18 @@ function App() {
               <div><small>Total vendido</small><b>{brl.format(dayHistory.salesTotal)}</b></div>
               <div><small>Lançamentos Bling</small><b>{dayHistory.blingEntries.length}</b></div>
             </div>
+            {dayHistory.pendingSales > 0 && <p className="inline-warning">Há {dayHistory.pendingSales} venda(s) pendente(s) de sincronização. O fechamento fica bloqueado até a conferência.</p>}
             <h3>Conferência por forma de pagamento</h3>
             <p className="muted">Confira o valor físico/operacional antes de fechar. Os valores registrados vêm das vendas deste PDV.</p>
             <div className="counted-list">{dayHistory.paymentTotals.length ? dayHistory.paymentTotals.map(item => {
+              const expected = /dinheiro|cash/i.test(item.name) ? dayHistory.expectedCash : item.amount;
               const counted = numberValue(countedValues[item.name] ?? '0');
-              return <div key={item.name}><span><b>{item.name}</b><small>Registrado: {brl.format(item.amount)}</small></span><label>Valor conferido<input value={countedValues[item.name] ?? ''} inputMode="decimal" onChange={event => setCountedValues(current => ({ ...current, [item.name]: event.target.value }))} /></label><strong className={Math.abs(counted - item.amount) < .01 ? 'match' : 'difference'}>{Math.abs(counted - item.amount) < .01 ? 'Conferido' : `Diferença ${brl.format(counted - item.amount)}`}</strong></div>;
+              return <div key={item.name}><span><b>{item.name}</b><small>Esperado: {brl.format(expected)}</small></span><label>Valor conferido<input value={countedValues[item.name] ?? ''} inputMode="decimal" placeholder="Informe o valor contado" onChange={event => setCountedValues(current => ({ ...current, [item.name]: event.target.value }))} /></label><strong className={countedValues[item.name] !== undefined && Math.abs(counted - expected) < .01 ? 'match' : 'difference'}>{countedValues[item.name] === undefined ? 'Aguardando conferência' : Math.abs(counted - expected) < .01 ? 'Conferido' : `Diferença ${brl.format(counted - expected)}`}</strong></div>;
             }) : <div className="empty-state compact">Nenhuma venda registrada hoje.</div>}</div>
             <h3>Histórico financeiro do Bling</h3>
             <div className="bling-history">{dayHistory.blingEntries.length ? dayHistory.blingEntries.map(entry => <div key={entry.id}><span>{entry.description}<small>{entry.accountName ?? cashSession?.accountName}</small></span><b className={entry.direction === 'D' ? 'debit' : 'credit'}>{entry.direction === 'D' ? '−' : '+'} {brl.format(entry.amount)}</b></div>) : <div className="empty-state compact">Sem lançamentos no Bling para esta conta hoje.</div>}</div>
             <label>Observação do fechamento<textarea value={operationNotes} onChange={event => setOperationNotes(event.target.value)} placeholder="Opcional" /></label>
-            <div className="dialog-actions"><button className="secondary" onClick={() => setOperationModal(undefined)}>Cancelar</button><button className="finish" disabled={operationBusy} onClick={() => void closeCash()}>{operationBusy ? 'Sincronizando…' : 'Confirmar fechamento'}</button></div>
+            <div className="dialog-actions"><button className="secondary" onClick={() => setOperationModal(undefined)}>Cancelar</button><button className="finish" disabled={operationBusy || dayHistory.pendingSales > 0 || dayHistory.paymentTotals.some(item => countedValues[item.name] === undefined || countedValues[item.name].trim() === '')} onClick={() => void closeCash()}>{operationBusy ? 'Sincronizando…' : 'Confirmar fechamento'}</button></div>
           </>}
         </div>}
         {operationModal === 'return' && <div className="return-list">
