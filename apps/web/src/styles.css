@@ -257,3 +257,31 @@ kbd { padding: 3px 7px; border: 1px solid #d4ddd7; border-bottom-width: 2px; bor
 .enrollment-box button:disabled { opacity: .4; cursor: not-allowed; }
 .consent-check { display: flex; align-items: flex-start; gap: 9px; margin: 0; font-size: 11px; line-height: 1.4; font-weight: 600; color: #4e5e54; }
 .consent-check input { width: 16px; height: 16px; flex: 0 0 auto; margin-top: 1px; }
+
+
+/* Checkout comercial e fiscal */
+.final-consumer { display: flex; align-items: center; justify-content: space-between; gap: 18px; border: 1px solid #cfe5d6; background: linear-gradient(135deg, #f7fcf8, #edf8f1); }
+.final-consumer h3 { margin: 8px 0 4px; }
+.final-consumer p { color: #617067; font-size: 13px; }
+.final-consumer button { white-space: nowrap; }
+.totals-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.commercial-terms { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 16px 0 22px; padding: 16px; border: 1px solid #dfe8e1; border-radius: 12px; background: #f8faf8; }
+.field-group { display: flex; flex-direction: column; gap: 7px; font-weight: 750; font-size: 12px; }
+.field-group input, .field-group select, .sale-details select, .sale-details textarea { width: 100%; border: 1px solid #ccd8cf; border-radius: 9px; background: #fff; padding: 11px 12px; color: #17201a; }
+.discount-control { display: grid; grid-template-columns: 118px 1fr; gap: 8px; }
+.sale-details { display: grid; gap: 13px; margin: 18px 0; padding: 16px; border: 1px solid #dfe8e1; border-radius: 12px; background: #fbfcfb; }
+.sale-details > label:not(.fiscal-check) { display: grid; gap: 7px; font-weight: 750; font-size: 12px; }
+.sale-details textarea { min-height: 72px; resize: vertical; }
+.fiscal-check { display: flex; align-items: flex-start; gap: 10px; padding: 12px; border-radius: 10px; background: #eaf7ee; cursor: pointer; }
+.fiscal-check input { margin-top: 3px; accent-color: #228b4d; }
+.fiscal-check span { display: grid; gap: 3px; }
+.fiscal-check small { letter-spacing: 0; }
+.inline-warning { color: #875b00; background: #fff3cf; border-radius: 8px; padding: 9px 11px; font-size: 12px; }
+.cart-product-info { display: grid; gap: 3px; min-width: 0; }
+.item-comment { width: min(300px, 100%); border: 0; border-bottom: 1px dashed #c5d1c8; background: transparent; padding: 5px 0; color: #526158; font-size: 11px; }
+.item-comment:focus { outline: none; border-bottom-color: #2e9f5b; }
+.cart-summary-card { box-shadow: 0 -12px 30px #173d2410; }
+@media (max-width: 850px) {
+  .commercial-terms { grid-template-columns: 1fr; }
+  .final-consumer { align-items: stretch; flex-direction: column; }
+}
