@@ -157,3 +157,44 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 }
 
 .status-pill{display:inline-flex;align-items:center;border-radius:999px;padding:7px 12px;font-size:13px;font-weight:700;background:#eef4ef;color:#53645a}.status-pill.online{background:#d9f3dc;color:#147333}.header-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.catalog-result-count{margin:12px 0 0;color:#647067;font-size:13px}.product-empty{margin-top:16px}
+
+/* Caixa operacional: informações essenciais sempre visíveis */
+main { max-width: 1600px; padding: 18px 24px; }
+.pos-header { gap: 24px; }
+.pos-header > div:first-child { min-width: 190px; }
+.operator-select { display: flex; align-items: center; gap: 9px; margin: 0; padding: 6px 8px 6px 12px; border-radius: 10px; background: #eaf1ec; font-weight: 700; }
+.operator-select span { padding: 0; background: transparent; white-space: nowrap; }
+.operator-select select { min-width: 190px; padding: 8px 34px 8px 10px; border-color: #c5d7ca; }
+.status-pill.offline { background: #fff0d5; color: #986100; }
+.workspace { grid-template-columns: minmax(520px, 1fr) minmax(520px, 1fr); min-height: 620px; }
+.panel, .cart { padding: 26px 30px; }
+.catalog { grid-template-columns: repeat(2, minmax(0, 1fr)); max-height: 390px; overflow: auto; padding-right: 4px; }
+.product { min-height: 82px; transition: border-color .15s, box-shadow .15s, transform .15s; }
+.product:hover { transform: translateY(-1px); box-shadow: 0 5px 16px #173d2412; }
+.product.out-of-stock { border-color: #e7bd72; background: #fffaf1; opacity: 1; }
+.product.out-of-stock:hover { border-color: #df9d2c; background: #fff7e8; }
+.product small em { font-style: normal; }
+.stock { color: #27804a; font-weight: 700; }
+.stock.zero { color: #a36600; }
+.cart { position: relative; }
+.cart-total { margin-top: auto; }
+.search { font-size: 16px; }
+.search-action { min-width: 116px; }
+@media (max-width: 1050px) {
+  .pos-header { align-items: flex-start; }
+  .header-actions { justify-content: flex-end; }
+  .operator-select { width: 100%; }
+  .operator-select select { min-width: 0; }
+  .workspace { grid-template-columns: 1fr; }
+  .panel, .cart { border-radius: 0; border-left: 1px solid #dfe5e0; }
+  .cart { min-height: 420px; }
+}
+@media (max-width: 680px) {
+  main { padding: 12px; }
+  .pos-header { display: block; }
+  .header-actions { margin-top: 12px; justify-content: flex-start; }
+  .catalog { grid-template-columns: 1fr; }
+  .integration-note { display: none; }
+  .steps button { padding: 11px 5px; font-size: 12px; }
+  .panel, .cart { padding: 18px; }
+}
