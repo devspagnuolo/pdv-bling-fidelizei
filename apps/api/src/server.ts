@@ -59,22 +59,13 @@ const getSale = async (id: string) => {
   const cached = sales.get(id);
   if (cached) return cached;
   if (!pool) return undefined;
-  const result = await pool.query<{ data: Sale }>('select data from pdv_sales where id = $1', [id]);
+  const result = await pool.query('select data from pdv_sales where id = $1', [id]) as { rows: { data: Sale }[] };
   const sale = result.rows[0]?.data;
   if (sale) sales.set(sale.id, sale);
   return sale;
 };
 const reconcileFidelizeiSale = async (sale: Sale) => {
   if (sale.status !== 'RECONCILIATION_REQUIRED' || !sale.blingOrderId) return;
-  if (sale.emitFiscal) {
-    try {
-      await bling.generateNfce(order.id);
-      sale.fiscalStatus = 'REQUESTED';
-    } catch (error) {
-      sale.fiscalStatus = 'FAILED';
-      app.log.error({ error, saleId: sale.id, blingOrderId: order.id }, 'Pedido criado, mas a NFC-e não foi gerada no Bling');
-    }
-  }
   try {
     const tx = await fidelizei.registerSale({
       externalSaleId: sale.id,
@@ -92,9 +83,9 @@ const reconcileFidelizeiSale = async (sale: Sale) => {
 };
 const reconcilePendingSales = async () => {
   if (!pool) return;
-  const result = await pool.query<{ data: Sale }>(
+  const result = await pool.query(
     `select data from pdv_sales where status = 'RECONCILIATION_REQUIRED' order by updated_at asc limit 50`
-  );
+  ) as { rows: { data: Sale }[] };
   for (const row of result.rows) await reconcileFidelizeiSale(row.data);
 };
 setInterval(() => void reconcilePendingSales().catch(error => app.log.error(error, 'Falha na rotina de reconciliação Fidelizei')), 60_000).unref();
@@ -212,6 +203,15 @@ app.post('/sales/:id/complete', async (req) => {
     paymentMethodId: paymentMethod.id,
     idempotencyKey: sale.id
   });
+  if (sale.emitFiscal) {
+    try {
+      await bling.generateNfce(order.id);
+      sale.fiscalStatus = 'REQUESTED';
+    } catch (error) {
+      sale.fiscalStatus = 'FAILED';
+      app.log.error({ error, saleId: sale.id, blingOrderId: order.id }, 'Pedido criado, mas a NFC-e não foi gerada no Bling');
+    }
+  }
   try {
     const tx = await fidelizei.registerSale({
       externalSaleId: sale.id,
