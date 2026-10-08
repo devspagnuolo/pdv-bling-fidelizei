@@ -1,7 +1,7 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import { randomUUID } from 'node:crypto';
-import { bling, fidelizei } from './integrations/demo.js';
+import { bling, fidelizei, getFidelizeiConnectionStatus } from './integrations/demo.js';
 import {
   consumeBlingOAuthState,
   createBlingOAuthState,
@@ -55,11 +55,7 @@ const persist = async (sale: Sale) => {
 app.get('/health', async () => ({ ok: true, persistence: pool ? 'postgres' : 'memory' }));
 app.get('/integrations/status', async () => ({
   bling: await getBlingConnectionStatus(),
-  fidelizaPlus: {
-    configured: Boolean(process.env.FIDELIZAPLUS_API_URL && process.env.FIDELIZAPLUS_API_TOKEN),
-    connected: Boolean(process.env.FIDELIZAPLUS_API_URL && process.env.FIDELIZAPLUS_API_TOKEN),
-    mode: process.env.FIDELIZAPLUS_API_TOKEN ? 'api-token' : 'demo'
-  }
+  fidelizaPlus: await getFidelizeiConnectionStatus()
 }));
 app.get('/integrations/bling/connect', async (_req, reply) => {
   const clientId = process.env.BLING_CLIENT_ID;
