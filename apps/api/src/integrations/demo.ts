@@ -239,6 +239,8 @@ export const getFidelizeiConnectionStatus = async () => {
     headers['access-token'] = accessToken;
   } else if (bearerToken) {
     headers.Authorization = `Bearer ${bearerToken}`;
+    headers['x-api-key'] = bearerToken;
+    headers['api-key'] = bearerToken;
   } else {
     return { configured: false, connected: false, mode: 'demo' as const };
   }
