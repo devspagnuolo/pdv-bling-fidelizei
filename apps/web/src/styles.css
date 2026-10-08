@@ -297,3 +297,185 @@ kbd { padding: 3px 7px; border: 1px solid #d4ddd7; border-bottom-width: 2px; bor
 .steps button.active { box-shadow: inset 0 -3px 0 #e7f7eb; }
 .finish, .cart-primary, .search-action { background: #13834a; }
 .finish:hover, .cart-primary:hover, .search-action:hover { background: #0d6d3c; }
+
+
+/* Paleta oficial Vivi Moda Plus Size — inspirada na identidade original */
+:root {
+  --vivi-graphite: #17171b;
+  --vivi-graphite-soft: #292930;
+  --vivi-gold: #d89a00;
+  --vivi-gold-light: #ffc21a;
+  --vivi-orange: #ff7900;
+  --vivi-red: #ff365f;
+  --vivi-magenta: #d600c8;
+  --vivi-cream: #fff8e8;
+  --brand: var(--vivi-gold);
+  --brand-dark: var(--vivi-graphite);
+  --brand-soft: #fff3cc;
+  --ink: #17171b;
+  --muted: #716d67;
+  --line: #e7e1d8;
+}
+body {
+  background:
+    radial-gradient(circle at 0 0, rgba(255, 194, 26, .12), transparent 26%),
+    radial-gradient(circle at 100% 0, rgba(214, 0, 200, .06), transparent 22%),
+    #f7f5f1;
+}
+.pos-header {
+  border-bottom-color: #ded7cc;
+}
+.vivi-logo {
+  width: 170px;
+  height: 62px;
+  padding: 8px 12px;
+  object-fit: contain;
+  object-position: center;
+  border: 1px solid #3b3b42;
+  border-radius: 15px;
+  background: linear-gradient(145deg, #323238, #111114);
+  box-shadow: 0 9px 24px rgba(23, 23, 27, .22);
+}
+.brand-block small {
+  color: #8b6700;
+  font-weight: 800;
+}
+.integration-strip,
+.panel,
+.cart {
+  border-color: var(--line);
+  box-shadow: 0 10px 30px rgba(38, 31, 20, .06);
+}
+.integration-strip a {
+  color: #7c5900;
+  border-color: #d9ad3f;
+}
+.integration-strip a:hover {
+  background: var(--vivi-cream);
+}
+.steps {
+  background: #e9e5df;
+}
+.steps button {
+  color: #625e57;
+}
+.steps button.active {
+  position: relative;
+  color: #fff;
+  background: linear-gradient(145deg, #292930, #111114);
+  box-shadow: none;
+}
+.steps button.active::after {
+  content: "";
+  position: absolute;
+  right: 10px;
+  bottom: 0;
+  left: 10px;
+  height: 4px;
+  border-radius: 99px 99px 0 0;
+  background: linear-gradient(90deg, var(--vivi-gold-light), var(--vivi-orange), var(--vivi-red), var(--vivi-magenta));
+}
+.section-title > span,
+.cart-title > span {
+  color: #775500;
+  background: #fff3cc;
+}
+.search-field input:focus,
+.search:focus,
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: var(--vivi-gold);
+  outline-color: rgba(255, 194, 26, .35);
+  box-shadow: 0 0 0 4px rgba(255, 194, 26, .13);
+}
+.scan-icon {
+  color: #9a6d00;
+}
+.search-action,
+.row button,
+.next,
+.finish,
+.enrollment-box button,
+.cart-primary {
+  color: #fff;
+  background: linear-gradient(145deg, #2b2b31, #111114);
+  box-shadow: 0 7px 17px rgba(23, 23, 27, .16);
+}
+.search-action:hover:not(:disabled),
+.row button:hover:not(:disabled),
+.next:hover:not(:disabled),
+.finish:hover:not(:disabled),
+.enrollment-box button:hover:not(:disabled),
+.cart-primary:hover:not(:disabled) {
+  background: linear-gradient(145deg, #3b2c00, #17171b);
+  box-shadow: inset 0 -3px 0 var(--vivi-gold);
+}
+.secondary {
+  color: #7b5700;
+  border-color: var(--vivi-gold);
+}
+.secondary:hover {
+  color: #17171b;
+  background: var(--vivi-cream);
+}
+.product:hover {
+  border-color: var(--vivi-gold);
+  background: #fffaf0;
+  box-shadow: 0 6px 18px rgba(92, 66, 0, .09);
+}
+.product strong,
+.cart-total strong,
+.totals-grid .grand {
+  color: #6f5000;
+}
+.product.out-of-stock,
+.inline-warning,
+.message {
+  border-color: #efb84c;
+  background: #fff2cf;
+  color: #634700;
+}
+.customer-card,
+.final-consumer {
+  border-color: #e2c469;
+  background: linear-gradient(135deg, #fffdf8, #fff7dc);
+}
+.vip {
+  color: #211800;
+  background: linear-gradient(90deg, var(--vivi-gold-light), #f0a600);
+}
+.source-status.found,
+.status-pill.online {
+  color: #116a37;
+  background: #dcf4e4;
+}
+.payment-option.active {
+  border-color: var(--vivi-gold);
+  background: #fff9e8;
+  box-shadow: 0 0 0 2px rgba(255, 194, 26, .22);
+}
+.payment-option.active .payment-icon,
+.payment-option.active i {
+  border-color: var(--vivi-gold);
+  background: var(--vivi-graphite);
+}
+.fiscal-check {
+  background: #fff6dc;
+  border: 1px solid #edce78;
+}
+.fiscal-check input {
+  accent-color: var(--vivi-gold);
+}
+.cart-summary-card {
+  border-color: #e4d8bc;
+}
+.cart-summary-card .discount-line {
+  color: #a21569;
+}
+@media (max-width: 680px) {
+  .vivi-logo {
+    width: 142px;
+    height: 54px;
+  }
+}
