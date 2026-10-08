@@ -192,6 +192,68 @@ const generateNfce = async (orderId: string) => {
   if (!response.ok && response.status !== 204) throw new Error(`Bling não gerou a NFC-e (HTTP ${response.status})`);
   return { status: 'REQUESTED' as const };
 };
+const blingFailure = async (response: Response, operation: string): Promise<never> => {
+  const detail = await response.text();
+  const reconnect = response.status === 401 || response.status === 403
+    ? ' Reconecte o aplicativo autorizando Contas Financeiras e Caixas e Bancos.'
+    : '';
+  throw new Error(`Bling: ${operation} falhou (HTTP ${response.status}).${reconnect}${detail ? ` ${detail.slice(0, 240)}` : ''}`);
+};
+
+let accountsCache: { expires: number; data: { id: string; name: string; type: string; active: boolean }[] } | undefined;
+const fetchFinancialAccounts = async () => {
+  if (accountsCache && accountsCache.expires > Date.now()) return accountsCache.data;
+  const response = await blingRequest('/contas-contabeis?pagina=1&limite=100&ordenacao=descricao');
+  if (!response.ok) return blingFailure(response, 'consulta de contas financeiras');
+  const data = records(await response.json()).map(row => ({
+    id: textValue(row.id) ?? '',
+    name: textValue(row.descricao ?? row.nome) ?? '',
+    type: textValue(row.tipo ?? row.tipoConta) ?? 'Conta financeira',
+    active: activeValue(row.situacao ?? row.ativo)
+  })).filter(item => item.id && item.name && item.active);
+  accountsCache = { expires: Date.now() + 5 * 60_000, data };
+  return data;
+};
+
+const fetchCashEntries = async (date: string, accountId?: string) => {
+  const all: Record<string, unknown>[] = [];
+  for (let page = 1; page <= 20; page += 1) {
+    const search = new URLSearchParams({ pagina: String(page), limite: '100', dataInicial: date, dataFinal: date });
+    if (accountId) search.set('idContaFinanceira', accountId);
+    const response = await blingRequest(`/caixas?${search.toString()}`);
+    if (!response.ok) return blingFailure(response, 'consulta do movimento de caixa');
+    const rows = records(await response.json());
+    all.push(...rows);
+    if (rows.length < 100) break;
+    await delay(360);
+  }
+  return all.map(row => ({
+    id: textValue(row.id) ?? '',
+    direction: textValue(row.debCred) ?? '',
+    status: textValue(row.situacao) ?? '',
+    amount: numericValue(row.valor),
+    date: textValue(row.data) ?? date,
+    description: textValue(row.descricao ?? row.observacoes ?? row.origem) ?? 'Lançamento Bling',
+    accountId: textValue((row.contaFinanceira as Record<string, unknown> | undefined)?.id),
+    accountName: textValue((row.contaFinanceira as Record<string, unknown> | undefined)?.descricao)
+  }));
+};
+
+const createCashEntry = async (input: { type: 'WITHDRAWAL' | 'SUPPLY' | 'OPENING'; amount: number; accountId: string; notes: string; date: string }) => {
+  const payload = {
+    data: input.date,
+    valor: input.amount,
+    debCred: input.type === 'WITHDRAWAL' ? 'D' : 'C',
+    competencia: input.date,
+    observacoes: input.notes,
+    contaFinanceira: { id: Number(input.accountId) }
+  };
+  const response = await blingRequest('/caixas', { method: 'POST', body: JSON.stringify(payload) });
+  if (!response.ok) return blingFailure(response, input.type === 'WITHDRAWAL' ? 'sangria' : input.type === 'SUPPLY' ? 'suprimento' : 'abertura de caixa');
+  const body = await response.json().catch(() => ({})) as { data?: { id?: string | number } };
+  return { id: body.data?.id ? String(body.data.id) : undefined, payload };
+};
+
 const getFiscalCapability = async () => {
   try {
     const response = await blingRequest('/nfce?pagina=1&limite=1');
@@ -273,7 +335,7 @@ export const getFidelizeiConnectionStatus = async () => {
   }
 };
 
-export const bling = { products: searchProducts, syncProducts, sellers: fetchSellers, paymentMethods: fetchPayments, findCustomer: findBlingCustomer, createOrder, generateNfce, getFiscalCapability };
+export const bling = { products: searchProducts, syncProducts, sellers: fetchSellers, paymentMethods: fetchPayments, financialAccounts: fetchFinancialAccounts, cashEntries: fetchCashEntries, createCashEntry, findCustomer: findBlingCustomer, createOrder, generateNfce, getFiscalCapability };
 export const fidelizei = {
   findCustomer: async (cpf: string) => {
     const normalized = cpf.replace(/\D/g, '');

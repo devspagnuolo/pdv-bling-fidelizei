@@ -38,5 +38,29 @@ export const initializeDatabase = async () => {
   await pool.query('create index if not exists bling_products_sku_idx on bling_products (lower(sku))');
   await pool.query('create index if not exists bling_products_barcode_idx on bling_products (barcode)');
   await pool.query('create index if not exists bling_products_name_idx on bling_products using gin (to_tsvector(\'simple\', name))');
+  await pool.query(`create table if not exists pdv_cash_sessions (
+    id uuid primary key,
+    operator_id text not null,
+    seller_id text,
+    account_id text not null,
+    account_name text not null,
+    status text not null check (status in ('OPEN','CLOSED')),
+    opening_amount numeric(14,2) not null default 0,
+    opened_at timestamptz not null default now(),
+    closed_at timestamptz,
+    closing_summary jsonb
+  )`);
+  await pool.query(`create unique index if not exists pdv_cash_sessions_operator_open_idx
+    on pdv_cash_sessions (operator_id) where status = 'OPEN'`);
+  await pool.query(`create table if not exists pdv_cash_operations (
+    id uuid primary key,
+    session_id uuid not null references pdv_cash_sessions(id),
+    operation_type text not null,
+    amount numeric(14,2) not null,
+    bling_entry_id text,
+    data jsonb not null default '{}'::jsonb,
+    created_at timestamptz not null default now()
+  )`);
+  await pool.query('create index if not exists pdv_cash_operations_session_idx on pdv_cash_operations (session_id, created_at)');
   await pool.query('delete from oauth_states where expires_at < now()');
 };

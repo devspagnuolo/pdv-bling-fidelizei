@@ -126,6 +126,145 @@ app.get('/catalog/products', async (req) => {
 });
 app.get('/catalog/sellers', async () => bling.sellers());
 app.get('/catalog/payment-methods', async () => bling.paymentMethods());
+const todayInSaoPaulo = () => new Intl.DateTimeFormat('sv-SE', { timeZone: 'America/Sao_Paulo' }).format(new Date());
+const requireDatabase = () => {
+  if (!pool) throw Object.assign(new Error('Banco de dados do PDV indisponível para operações de caixa'), { statusCode: 503 });
+  return pool;
+};
+const currentCashSession = async (operatorId: string) => {
+  const database = requireDatabase();
+  const result = await database.query(
+    `select id, operator_id as "operatorId", seller_id as "sellerId", account_id as "accountId",
+      account_name as "accountName", status, opening_amount::float8 as "openingAmount",
+      opened_at as "openedAt", closed_at as "closedAt", closing_summary as "closingSummary"
+     from pdv_cash_sessions where operator_id = $1 and status = 'OPEN' order by opened_at desc limit 1`,
+    [operatorId]
+  );
+  return result.rows[0];
+};
+
+app.get('/cash/accounts', async () => bling.financialAccounts());
+app.get('/cash/sessions/current', async (req) => {
+  const operatorId = String((req.query as { operatorId?: string }).operatorId ?? '');
+  if (!operatorId) return badRequest('Informe o operador do caixa');
+  return { session: await currentCashSession(operatorId) ?? null };
+});
+app.post('/cash/sessions/open', async (req) => {
+  const body = req.body as { operatorId?: string; sellerId?: string; accountId?: string; openingAmount?: number };
+  if (!body.operatorId || !body.accountId) return badRequest('Operador e conta financeira do Bling são obrigatórios');
+  if (await currentCashSession(body.operatorId)) return badRequest('Este operador já possui um caixa aberto');
+  const accounts = await bling.financialAccounts();
+  const account = accounts.find(item => item.id === body.accountId);
+  if (!account) return badRequest('Conta financeira não encontrada ou inativa no Bling');
+  const openingAmount = money(Math.max(0, Number(body.openingAmount) || 0));
+  const sessionId = randomUUID();
+  let blingEntryId: string | undefined;
+  if (openingAmount > 0) {
+    const entry = await bling.createCashEntry({
+      type: 'OPENING', amount: openingAmount, accountId: account.id,
+      notes: `Abertura de caixa PDV ${sessionId}`, date: todayInSaoPaulo()
+    });
+    blingEntryId = entry.id;
+  }
+  const database = requireDatabase();
+  await database.query(
+    `insert into pdv_cash_sessions (id, operator_id, seller_id, account_id, account_name, status, opening_amount)
+     values ($1,$2,$3,$4,$5,'OPEN',$6)`,
+    [sessionId, body.operatorId, body.sellerId ?? body.operatorId, account.id, account.name, openingAmount]
+  );
+  if (openingAmount > 0) await database.query(
+    `insert into pdv_cash_operations (id, session_id, operation_type, amount, bling_entry_id, data)
+     values ($1,$2,'OPENING',$3,$4,$5::jsonb)`,
+    [randomUUID(), sessionId, openingAmount, blingEntryId ?? null, JSON.stringify({ account })]
+  );
+  return { session: await currentCashSession(body.operatorId) };
+});
+app.post('/cash/entries', async (req) => {
+  const body = req.body as { sessionId?: string; type?: 'WITHDRAWAL' | 'SUPPLY'; amount?: number; notes?: string };
+  if (!body.sessionId || !['WITHDRAWAL','SUPPLY'].includes(String(body.type))) return badRequest('Operação de caixa inválida');
+  const amount = money(Number(body.amount));
+  if (!(amount > 0)) return badRequest('Informe um valor maior que zero');
+  const database = requireDatabase();
+  const result = await database.query(
+    `select id, account_id as "accountId", account_name as "accountName" from pdv_cash_sessions where id=$1 and status='OPEN'`,
+    [body.sessionId]
+  );
+  const session = result.rows[0];
+  if (!session) return badRequest('Caixa não está aberto');
+  const operationId = randomUUID();
+  const notes = body.notes?.trim() || (body.type === 'WITHDRAWAL' ? 'Sangria do caixa' : 'Suprimento do caixa');
+  const entry = await bling.createCashEntry({
+    type: body.type as 'WITHDRAWAL' | 'SUPPLY', amount, accountId: session.accountId,
+    notes: `${notes} · PDV ${operationId}`, date: todayInSaoPaulo()
+  });
+  await database.query(
+    `insert into pdv_cash_operations (id, session_id, operation_type, amount, bling_entry_id, data)
+     values ($1,$2,$3,$4,$5,$6::jsonb)`,
+    [operationId, body.sessionId, body.type, amount, entry.id ?? null, JSON.stringify({ notes, accountName: session.accountName })]
+  );
+  return { id: operationId, blingEntryId: entry.id, registeredInBling: true };
+});
+app.get('/cash/day', async (req) => {
+  const query = req.query as { date?: string; accountId?: string; sessionId?: string };
+  const date = query.date || todayInSaoPaulo();
+  const entries = await bling.cashEntries(date, query.accountId);
+  let salesRows: { data: Sale }[] = [];
+  let operations: unknown[] = [];
+  if (pool) {
+    const salesResult = await pool.query(
+      `select data from pdv_sales where status in ('COMPLETED','RECONCILIATION_REQUIRED')
+       and (data->>'createdAt')::timestamptz >= $1::timestamptz
+       and (data->>'createdAt')::timestamptz < ($1::timestamptz + interval '1 day')`,
+      [`${date}T00:00:00-03:00`]
+    ) as { rows: { data: Sale }[] };
+    salesRows = salesResult.rows;
+    if (query.sessionId) {
+      const operationResult = await pool.query(
+        `select id, operation_type as type, amount::float8 as amount, bling_entry_id as "blingEntryId", data, created_at as "createdAt"
+         from pdv_cash_operations where session_id=$1 order by created_at asc`, [query.sessionId]
+      );
+      operations = operationResult.rows;
+    }
+  }
+  const paymentTotals = new Map<string, number>();
+  for (const row of salesRows) for (const payment of row.data.payments ?? []) {
+    const name = payment.paymentMethodName || payment.paymentMethodId;
+    paymentTotals.set(name, money((paymentTotals.get(name) ?? 0) + payment.amount));
+  }
+  return {
+    date,
+    salesCount: salesRows.length,
+    salesTotal: money(salesRows.reduce((sum, row) => sum + row.data.total, 0)),
+    paymentTotals: [...paymentTotals].map(([name, amount]) => ({ name, amount })),
+    blingEntries: entries,
+    operations
+  };
+});
+app.post('/cash/sessions/:id/close', async (req) => {
+  const id = (req.params as { id: string }).id;
+  const body = req.body as { countedValues?: { name: string; amount: number }[]; notes?: string };
+  const database = requireDatabase();
+  const result = await database.query(
+    `select id, operator_id as "operatorId", account_id as "accountId" from pdv_cash_sessions where id=$1 and status='OPEN'`, [id]
+  );
+  const session = result.rows[0];
+  if (!session) return badRequest('Caixa já está fechado ou não existe');
+  const date = todayInSaoPaulo();
+  const entries = await bling.cashEntries(date, session.accountId);
+  const summary = {
+    closedAfterBlingSync: true,
+    date,
+    countedValues: (body.countedValues ?? []).map(item => ({ name: item.name, amount: money(Number(item.amount) || 0) })),
+    notes: body.notes?.trim() || undefined,
+    blingEntries: entries
+  };
+  await database.query(
+    `update pdv_cash_sessions set status='CLOSED', closed_at=now(), closing_summary=$2::jsonb where id=$1`,
+    [id, JSON.stringify(summary)]
+  );
+  return { closed: true, sessionId: id, summary };
+});
+
 app.get('/customers/:cpf', async (req) => lookupCustomer((req.params as { cpf: string }).cpf));
 app.post('/customers/fidelizei', async (req) => {
   const body = req.body as { name: string; cpf: string; phone?: string; email?: string; programConsent: boolean };
