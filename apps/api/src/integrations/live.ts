@@ -3,6 +3,8 @@ import { pool } from '../db.js';
 import { getBlingAccessToken } from './credentials.js';
 
 const BLING_API_URL = 'https://api.bling.com.br/Api/v3';
+const FETCH_TIMEOUT_MS = 15_000;
+const saoPauloDate = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date());
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const textValue = (value: unknown): string | undefined => {
   if (typeof value === 'string' || typeof value === 'number') return String(value);
@@ -27,7 +29,8 @@ const blingRequest = async (path: string, init: RequestInit = {}) => {
   for (let attempt = 0; attempt < 4; attempt += 1) {
     const response = await fetch(`${BLING_API_URL}${path}`, {
       ...init,
-      headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Content-Type': 'application/json', 'enable-jwt': '1', ...(init.headers ?? {}) }
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Content-Type': 'application/json', 'enable-jwt': '1', ...(init.headers ?? {}) },
+      signal: init.signal ?? AbortSignal.timeout(FETCH_TIMEOUT_MS)
     });
     if (response.status !== 429) return response;
     await delay(900 * (attempt + 1));
@@ -59,13 +62,15 @@ const syncProducts = () => {
       if (!response.ok) throw new Error(`Bling não retornou o catálogo (HTTP ${response.status})`);
       const rows = records(await response.json());
       const products = rows.map(normalizeProduct).filter((item): item is Product => Boolean(item));
-      for (const product of products) {
+      if (products.length) {
         await pool.query(
           `insert into bling_products (id, sku, name, price, stock, barcode, synced_at)
-           values ($1,$2,$3,$4,$5,$6,now())
+           select id, sku, name, price, stock, barcode, now()
+           from jsonb_to_recordset($1::jsonb)
+             as item(id text, sku text, name text, price numeric, stock numeric, barcode text)
            on conflict (id) do update set sku=excluded.sku, name=excluded.name, price=excluded.price,
              stock=excluded.stock, barcode=excluded.barcode, synced_at=now()`,
-          [product.id, product.sku, product.name, product.price, product.stock, product.barcode ?? null]
+          [JSON.stringify(products.map(product => ({ ...product, barcode: product.barcode ?? null })))]
         );
       }
       total += products.length;
@@ -174,7 +179,7 @@ const createOrder = async (input: { customerId?: string; sellerId: string; items
     transporte: input.freight ? { fretePorConta: 0, frete: input.freight } : undefined,
     observacoes: orderNotes || undefined,
     parcelas: input.payments.map(payment => ({
-      dataVencimento: new Date().toISOString().slice(0, 10),
+      dataVencimento: saoPauloDate(),
       valor: payment.amount,
       formaPagamento: { id: Number(payment.paymentMethodId) }
     }))
@@ -281,7 +286,8 @@ const fidelizeiFetch = async (path: string, init: RequestInit = {}) => {
         Accept: 'application/json',
         'Content-Type': 'application/json',
         ...(init.headers ?? {})
-      }
+      },
+      signal: init.signal ?? AbortSignal.timeout(FETCH_TIMEOUT_MS)
     });
     if (response.status !== 429 && response.status < 500) return response;
     await delay(700 * 2 ** attempt);
