@@ -230,7 +230,7 @@ function App() {
 
   return <main>
     <header className="pos-header">
-      <div><small>PDV INDEPENDENTE · CAIXA 01</small><h1>Venda</h1></div>
+      <div className="brand-block"><span className="brand-mark">V</span><div><small>VIVI MODA · CAIXA 01</small><h1>Frente de caixa</h1><p>Venda integrada ao Bling e Fidelizei</p></div></div>
       <div className="header-actions">
         <label className="operator-select"><span>Operador / vendedor</span><select value={seller} onChange={e => setSeller(e.target.value)}>
           <option value="">Selecione no Bling</option>{sellers.map(s => <option value={s.id} key={s.id}>{s.name}</option>)}
@@ -265,7 +265,7 @@ function App() {
         {step === 'product' && <>
           <div className="section-title"><div><small>ETAPA 1</small><h2>Adicionar produtos</h2></div><span>Busca direta no Bling</span></div>
           <div className="catalog-search">
-            <input ref={searchInputRef} id="product-search" className="search" value={query} onChange={e => { setQuery(e.target.value); setCatalogSearchActive(false); }} onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); void searchCatalog(); } }} placeholder="Bipe o código de barras ou pesquise SKU / produto" autoFocus />
+            <div className="search-field"><span className="scan-icon">⌁</span><input ref={searchInputRef} id="product-search" className="search" value={query} onChange={e => { setQuery(e.target.value); setCatalogSearchActive(false); }} onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); void searchCatalog(); } }} placeholder="Bipe o código de barras ou pesquise SKU / produto" autoFocus /><kbd>F2</kbd></div>
             <button className="search-action" onClick={() => void searchCatalog()} disabled={searchingCatalog}>{searchingCatalog ? 'Buscando…' : 'Buscar'}</button>
           </div>
           <p className="scanner-hint">Leitor de código de barras conectado? Basta bipar e pressionar Enter.</p>
@@ -350,7 +350,14 @@ function App() {
           <div className="qty"><button onClick={() => quantity(i.id, -1)}>−</button><span>{i.quantity}</span><button onClick={() => quantity(i.id, 1)}>+</button></div>
           <strong>{brl.format(i.price * i.quantity)}</strong>
         </div>) : <div className="empty-cart"><span>🛍️</span><p>Nenhum produto adicionado</p></div>}</div>
-        <div className="cart-total"><span>Total</span><strong>{brl.format(total)}</strong></div>
+        <div className="cart-summary-card">
+          <div><span>Subtotal</span><b>{brl.format(subtotal)}</b></div>
+          {(sale?.discount ?? 0) > 0 && <div className="discount-line"><span>Desconto</span><b>− {brl.format(sale?.discount ?? 0)}</b></div>}
+          <div className="cart-total"><span>Total</span><strong>{brl.format(total)}</strong></div>
+          {step === 'product' && <button className="cart-primary" disabled={!items.length} onClick={() => setStep('customer')}>Identificar cliente <kbd>F4</kbd></button>}
+          {step === 'customer' && <button className="cart-primary" disabled={!items.length} onClick={() => setStep('payment')}>Ir para pagamento <kbd>F10</kbd></button>}
+          {step === 'payment' && <button className="cart-primary" disabled={!items.length || !seller || !paymentMethodId} onClick={complete}>Finalizar · {brl.format(total)} <kbd>F10</kbd></button>}
+        </div>
       </aside>
     </section>
   </main>;
