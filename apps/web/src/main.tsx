@@ -500,7 +500,7 @@ function App() {
                       {paymentMethods.map(item => <option value={item.id} key={item.id}>{paymentIcon(item)} {item.name}</option>)}
                     </select></label>
                     <label>Valor nesta forma<input value={payment.amount} inputMode="decimal" onChange={event => updatePayment(payment.key, { amount: event.target.value })} /></label>
-                    <button className="fill-balance" onClick={() => fillPaymentBalance(payment.key)} disabled={remainingPayment <= 0}>Usar saldo</button>
+                    <button className="fill-balance" onClick={() => fillPaymentBalance(payment.key)} disabled={Math.abs(remainingPayment) < .01 || roundMoney(numberValue(payment.amount) + remainingPayment) <= 0}>Ajustar saldo</button>
                   </div>
                   {method && /cart|credit|debit|crédito|credito|débito|debito/i.test(`${method.name} ${method.type}`) && <p className="bling-rule-note">Taxas, prazo e conta de recebimento seguem a configuração desta forma no Bling.</p>}
                   {cash && <div className="cash-payment">
