@@ -285,3 +285,15 @@ kbd { padding: 3px 7px; border: 1px solid #d4ddd7; border-bottom-width: 2px; bor
   .commercial-terms { grid-template-columns: 1fr; }
   .final-consumer { align-items: stretch; flex-direction: column; }
 }
+
+
+/* Identidade Vivi Moda */
+.brand-block { gap: 14px; }
+.vivi-logo { width: 156px; height: 48px; object-fit: contain; object-position: left center; border-radius: 8px; }
+.pos-header { padding: 10px 0 16px; border-bottom: 1px solid #e5ebe6; }
+.pos-header h1 { letter-spacing: -0.03em; }
+.panel, .cart { box-shadow: 0 8px 28px rgba(23, 55, 35, .05); }
+.steps button { position: relative; transition: background .15s ease, color .15s ease; }
+.steps button.active { box-shadow: inset 0 -3px 0 #e7f7eb; }
+.finish, .cart-primary, .search-action { background: #13834a; }
+.finish:hover, .cart-primary:hover, .search-action:hover { background: #0d6d3c; }
