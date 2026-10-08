@@ -232,7 +232,7 @@ export const getFidelizeiConnectionStatus = async () => {
   const baseUrl = (process.env.FIDELIZI_API_URL ?? process.env.FIDELIZEI_API_URL ?? process.env.FIDELIZAPLUS_API_URL ?? 'https://integracao.fidelizii.com.br/api/v3').replace(/\/$/, '');
   const appToken = process.env.FIDELIZI_APP_TOKEN ?? process.env.FIDELIZEI_APP_TOKEN ?? process.env.FIDELIZAPLUS_APP_TOKEN;
   const accessToken = process.env.FIDELIZI_ACCESS_TOKEN ?? process.env.FIDELIZEI_ACCESS_TOKEN ?? process.env.FIDELIZAPLUS_ACCESS_TOKEN;
-  const bearerToken = process.env.FIDELIZAPLUS_API_TOKEN;
+  const bearerToken = process.env.FIDELIZEI_API_KEY ?? process.env.FIDELIZI_API_KEY ?? process.env.FIDELIZAPLUS_API_TOKEN;
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (appToken && accessToken) {
     headers['app-token'] = appToken;
