@@ -139,7 +139,7 @@ const currentCashSession = async (operatorId: string) => {
       opened_at as "openedAt", closed_at as "closedAt", closing_summary as "closingSummary"
      from pdv_cash_sessions where operator_id = $1 and status = 'OPEN' order by opened_at desc limit 1`,
     [operatorId]
-  );
+  ) as { rows: any[] };
   return result.rows[0];
 };
 
@@ -188,7 +188,7 @@ app.post('/cash/entries', async (req) => {
   const result = await database.query(
     `select id, account_id as "accountId", account_name as "accountName" from pdv_cash_sessions where id=$1 and status='OPEN'`,
     [body.sessionId]
-  );
+  ) as { rows: any[] };
   const session = result.rows[0];
   if (!session) return badRequest('Caixa não está aberto');
   const operationId = randomUUID();
@@ -222,7 +222,7 @@ app.get('/cash/day', async (req) => {
       const operationResult = await pool.query(
         `select id, operation_type as type, amount::float8 as amount, bling_entry_id as "blingEntryId", data, created_at as "createdAt"
          from pdv_cash_operations where session_id=$1 order by created_at asc`, [query.sessionId]
-      );
+      ) as { rows: any[] };
       operations = operationResult.rows;
     }
   }
@@ -246,7 +246,7 @@ app.post('/cash/sessions/:id/close', async (req) => {
   const database = requireDatabase();
   const result = await database.query(
     `select id, operator_id as "operatorId", account_id as "accountId" from pdv_cash_sessions where id=$1 and status='OPEN'`, [id]
-  );
+  ) as { rows: any[] };
   const session = result.rows[0];
   if (!session) return badRequest('Caixa já está fechado ou não existe');
   const date = todayInSaoPaulo();
