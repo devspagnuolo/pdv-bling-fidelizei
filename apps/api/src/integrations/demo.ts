@@ -132,23 +132,30 @@ const fetchProducts = async (query = ''): Promise<Product[]> => {
   const cached = productCache.get(normalizedQuery);
   if (cached && cached.expiresAt > Date.now()) return cached.data;
 
-  const url = new URL(`${BLING_API_URL}/produtos`);
-  url.searchParams.set('pagina', '1');
-  url.searchParams.set('limite', '100');
-  if (normalizedQuery) {
-    if (/^\\d{8,14}$/.test(normalizedQuery)) url.searchParams.append('gtins[]', normalizedQuery);
-    else url.searchParams.set('pesquisa', normalizedQuery);
+  const result: Product[] = [];
+  const isBarcode = /^\\d{8,14}$/.test(normalizedQuery);
+  // O Bling pagina as respostas em blocos de até 100. Percorremos todas as páginas
+  // para que uma busca não fique restrita aos primeiros produtos do cadastro.
+  for (let page = 1; page <= 250; page += 1) {
+    const url = new URL(`${BLING_API_URL}/produtos`);
+    url.searchParams.set('pagina', String(page));
+    url.searchParams.set('limite', '100');
+    if (normalizedQuery) {
+      if (isBarcode) url.searchParams.append('gtins[]', normalizedQuery);
+      else url.searchParams.set('pesquisa', normalizedQuery);
+    }
+    const response = await fetch(url, {
+      headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json', 'enable-jwt': '1' }
+    });
+    if (!response.ok) throw new Error(`Bling não retornou os produtos (HTTP ${response.status})`);
+    const payload = await response.json() as { data?: unknown };
+    const rows = Array.isArray(payload.data) ? payload.data : [];
+    result.push(...rows
+      .filter((row): row is Record<string, unknown> => Boolean(row) && typeof row === 'object')
+      .map(normalizeProduct)
+      .filter((product): product is Product => Boolean(product)));
+    if (rows.length < 100 || isBarcode) break;
   }
-  const response = await fetch(url, {
-    headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json', 'enable-jwt': '1' }
-  });
-  if (!response.ok) throw new Error(`Bling não retornou os produtos (HTTP ${response.status})`);
-  const payload = await response.json() as { data?: unknown };
-  const rows = Array.isArray(payload.data) ? payload.data : [];
-  const result = rows
-    .filter((row): row is Record<string, unknown> => Boolean(row) && typeof row === 'object')
-    .map(normalizeProduct)
-    .filter((product): product is Product => Boolean(product));
   productCache.set(normalizedQuery, { expiresAt: Date.now() + 60_000, data: result });
   return result;
 };
