@@ -73,7 +73,7 @@ function App() {
   const [discountInput, setDiscountInput] = useState('0');
   const [freightInput, setFreightInput] = useState('0');
   const [observations, setObservations] = useState('');
-  const [emitFiscal, setEmitFiscal] = useState(true);
+  const [emitFiscal, setEmitFiscal] = useState(false);
   const [message, setMessage] = useState('');
   const searchInputRef = useRef<HTMLInputElement>(null);
 
@@ -199,7 +199,7 @@ function App() {
     setDiscountInput('0');
     setFreightInput('0');
     setObservations('');
-    setEmitFiscal(true);
+    setEmitFiscal(false);
     setMessage('');
     searchInputRef.current?.focus();
   };
@@ -283,7 +283,7 @@ function App() {
 
   return <main>
     <header className="pos-header">
-      <div className="brand-block"><span className="brand-mark">V</span><div><small>VIVI MODA · CAIXA 01</small><h1>Frente de caixa</h1><p>Venda integrada ao Bling e Fidelizei</p></div></div>
+      <div className="brand-block"><img className="vivi-logo" src="/vivi-logo.svg" alt="Vivi Moda Plus Size" /><div><small>VIVI MODA · CAIXA 01</small><h1>Frente de caixa</h1><p>Venda integrada ao Bling e Fidelizei</p></div></div>
       <div className="header-actions">
         <label className="operator-select"><span>Operador / vendedor</span><select value={seller} onChange={e => setSeller(e.target.value)}>
           <option value="">Selecione no Bling</option>{sellers.map(s => <option value={s.id} key={s.id}>{s.name}</option>)}
@@ -401,7 +401,7 @@ function App() {
             <label>Vendedor do Bling<select value={seller} onChange={e => { setSeller(e.target.value); setSale(undefined); }}><option value="">Selecione o vendedor responsável</option>{sellers.map(item => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
             {!sellers.length && <p className="inline-warning">Nenhum vendedor retornado pelo Bling. Reconecte a integração e atualize a página.</p>}
             <label>Observações da venda<textarea value={observations} onChange={e => { setObservations(e.target.value); setSale(undefined); }} placeholder="Ex.: venda online, retirada, instruções de troca ou entrega" /></label>
-            <label className="fiscal-check"><input type="checkbox" checked={emitFiscal} onChange={e => { setEmitFiscal(e.target.checked); setSale(undefined); }} /><span><b>Gerar NFC-e ao finalizar</b><small>Usa a configuração fiscal cadastrada no Bling.</small></span></label>
+            <label className="fiscal-check"><input type="checkbox" checked={emitFiscal} onChange={e => { setEmitFiscal(e.target.checked); setSale(undefined); }} /><span><b>Emitir NFC-e ao finalizar</b><small>Opcional · usa a configuração fiscal cadastrada no Bling.</small></span></label>
             {emitFiscal && integrations?.fiscal && !integrations.fiscal.available && <p className="inline-warning">O acesso fiscal do Bling não está disponível para esta conexão.</p>}
           </section>
           <div className="summary">
