@@ -110,7 +110,7 @@ const fetchSellers = async (): Promise<Seller[]> => {
   if (!response.ok) throw new Error(`Bling não retornou os vendedores (HTTP ${response.status})`);
   const data = records(await response.json()).map(row => ({
     id: textValue(row.id) ?? '',
-    name: textValue(row.nome) ?? '',
+    name: textValue(row.nome ?? (row.contato as Record<string, unknown> | undefined)?.nome) ?? '',
     active: activeValue(row.situacao ?? row.ativo)
   })).filter(item => item.id && item.name && item.active);
   sellersCache = { expires: Date.now() + 5 * 60_000, data };
@@ -143,20 +143,54 @@ const findBlingCustomer = async (cpf: string): Promise<BlingCustomer | undefined
   if (!id || !name) return undefined;
   return { id, cpf: document, name, email: textValue(raw.email), phone: textValue(raw.celular ?? raw.telefone) };
 };
-const createOrder = async (input: { customerId?: string; sellerId: string; items: SaleItem[]; discount: number; paymentMethodId: string; idempotencyKey: string }) => {
-  const total = input.items.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0) - input.discount;
+let finalConsumerCache: { expires: number; id: string } | undefined;
+const findFinalConsumerId = async () => {
+  if (finalConsumerCache && finalConsumerCache.expires > Date.now()) return finalConsumerCache.id;
+  const response = await blingRequest('/contatos?pagina=1&limite=100&pesquisa=Consumidor%20Final');
+  if (!response.ok) throw new Error(`Bling não retornou o Consumidor Final (HTTP ${response.status})`);
+  const row = records(await response.json()).find(item => /consumidor final/i.test(textValue(item.nome ?? item.fantasia) ?? ''));
+  const id = row ? textValue(row.id) : undefined;
+  if (!id) throw new Error('Cadastre ou ative o contato Consumidor Final no Bling');
+  finalConsumerCache = { expires: Date.now() + 10 * 60_000, id };
+  return id;
+};
+const createOrder = async (input: { customerId?: string; sellerId: string; items: SaleItem[]; discount: number; freight: number; observations?: string; paymentMethodId: string; idempotencyKey: string }) => {
+  const customerId = input.customerId ?? await findFinalConsumerId();
+  const total = input.items.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0) - input.discount + input.freight;
   const payload = {
     numeroLoja: input.idempotencyKey,
-    contato: input.customerId ? { id: Number(input.customerId) } : undefined,
+    contato: { id: Number(customerId) },
     vendedor: { id: Number(input.sellerId) },
-    itens: input.items.map(item => ({ codigo: item.sku, descricao: item.name, quantidade: item.quantity, valor: item.unitPrice })),
+    itens: input.items.map(item => ({
+      produto: { id: Number(item.productId) },
+      codigo: item.sku,
+      descricao: item.name,
+      quantidade: item.quantity,
+      valor: item.unitPrice,
+      observacao: item.comment || undefined
+    })),
     desconto: input.discount ? { valor: input.discount, unidade: 'REAL' } : undefined,
+    transporte: input.freight ? { fretePorConta: 0, valorFrete: input.freight } : undefined,
+    observacoes: input.observations || undefined,
     parcelas: [{ dataVencimento: new Date().toISOString().slice(0, 10), valor: total, formaPagamento: { id: Number(input.paymentMethodId) } }]
   };
   const response = await blingRequest('/pedidos/vendas', { method: 'POST', body: JSON.stringify(payload), headers: { 'Idempotency-Key': input.idempotencyKey } });
   const body = await response.json() as { data?: { id?: string | number }; error?: unknown };
   if (!response.ok || !body.data?.id) throw new Error(`Bling não criou o pedido (HTTP ${response.status})`);
   return { id: String(body.data.id), status: 'CONFIRMED' as const };
+};
+const generateNfce = async (orderId: string) => {
+  const response = await blingRequest(`/pedidos/vendas/${encodeURIComponent(orderId)}/gerar-nfce`, { method: 'POST' });
+  if (!response.ok && response.status !== 204) throw new Error(`Bling não gerou a NFC-e (HTTP ${response.status})`);
+  return { status: 'REQUESTED' as const };
+};
+const getFiscalCapability = async () => {
+  try {
+    const response = await blingRequest('/nfce?pagina=1&limite=1');
+    return { configured: response.ok, available: response.ok, source: 'BLING' as const, statusCode: response.status };
+  } catch {
+    return { configured: false, available: false, source: 'BLING' as const };
+  }
 };
 
 const fidelizeiConfig = () => {
@@ -231,7 +265,7 @@ export const getFidelizeiConnectionStatus = async () => {
   }
 };
 
-export const bling = { products: searchProducts, syncProducts, sellers: fetchSellers, paymentMethods: fetchPayments, findCustomer: findBlingCustomer, createOrder };
+export const bling = { products: searchProducts, syncProducts, sellers: fetchSellers, paymentMethods: fetchPayments, findCustomer: findBlingCustomer, createOrder, generateNfce, getFiscalCapability };
 export const fidelizei = {
   findCustomer: async (cpf: string) => {
     const normalized = cpf.replace(/\D/g, '');
