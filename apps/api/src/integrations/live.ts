@@ -1,0 +1,244 @@
+import type { BlingCustomer, Coupon, FidelizeiCustomer, PaymentMethod, Product, SaleItem, Seller } from '../domain.js';
+import { pool } from '../db.js';
+import { getBlingAccessToken } from './credentials.js';
+
+const BLING_API_URL = 'https://api.bling.com.br/Api/v3';
+const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+const textValue = (value: unknown): string | undefined => {
+  if (typeof value === 'string' || typeof value === 'number') return String(value);
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return textValue(record.descricao ?? record.nome ?? record.id);
+  }
+  return undefined;
+};
+const numericValue = (value: unknown, fallback = 0) => {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+const activeValue = (value: unknown) => value === undefined || value === null || value === true || value === 1 || ['A', 'ATIVO', 'ACTIVE', '1', 'TRUE'].includes(String(value).toUpperCase());
+const records = (payload: unknown): Record<string, unknown>[] => {
+  const body = payload as { data?: unknown };
+  return Array.isArray(body?.data) ? body.data.filter((row): row is Record<string, unknown> => Boolean(row) && typeof row === 'object') : [];
+};
+const blingRequest = async (path: string, init: RequestInit = {}) => {
+  const token = await getBlingAccessToken();
+  if (!token) throw new Error('Bling não conectado');
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const response = await fetch(`${BLING_API_URL}${path}`, {
+      ...init,
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Content-Type': 'application/json', 'enable-jwt': '1', ...(init.headers ?? {}) }
+    });
+    if (response.status !== 429) return response;
+    await delay(900 * (attempt + 1));
+  }
+  throw new Error('Limite temporário de consultas do Bling atingido');
+};
+const normalizeProduct = (raw: Record<string, unknown>): Product | undefined => {
+  const id = textValue(raw.id);
+  const name = textValue(raw.nome);
+  if (!id || !name) return undefined;
+  return {
+    id,
+    sku: textValue(raw.codigo) ?? id,
+    name,
+    price: numericValue(raw.preco ?? raw.precoVenda),
+    stock: numericValue(raw.estoqueAtual ?? raw.estoque ?? (raw.saldo as Record<string, unknown> | undefined)?.saldoVirtualTotal),
+    barcode: textValue(raw.gtin ?? raw.gtinPrincipal)
+  };
+};
+
+let syncPromise: Promise<number> | undefined;
+const syncProducts = () => {
+  if (syncPromise) return syncPromise;
+  syncPromise = (async () => {
+    if (!pool) return 0;
+    let total = 0;
+    for (let page = 1; page <= 500; page += 1) {
+      const response = await blingRequest(`/produtos?pagina=${page}&limite=100`);
+      if (!response.ok) throw new Error(`Bling não retornou o catálogo (HTTP ${response.status})`);
+      const rows = records(await response.json());
+      const products = rows.map(normalizeProduct).filter((item): item is Product => Boolean(item));
+      for (const product of products) {
+        await pool.query(
+          `insert into bling_products (id, sku, name, price, stock, barcode, synced_at)
+           values ($1,$2,$3,$4,$5,$6,now())
+           on conflict (id) do update set sku=excluded.sku, name=excluded.name, price=excluded.price,
+             stock=excluded.stock, barcode=excluded.barcode, synced_at=now()`,
+          [product.id, product.sku, product.name, product.price, product.stock, product.barcode ?? null]
+        );
+      }
+      total += products.length;
+      if (rows.length < 100) break;
+      await delay(550);
+    }
+    return total;
+  })().finally(() => { syncPromise = undefined; });
+  return syncPromise;
+};
+const searchProducts = async (query = ''): Promise<Product[]> => {
+  const term = query.trim();
+  if (!term) return [];
+  if (pool) {
+    const result = await pool.query(
+      `select id, sku, name, price::float8 as price, stock::float8 as stock, barcode
+       from bling_products
+       where lower(sku)=lower($1) or barcode=$1 or name ilike $2 or sku ilike $2
+       order by case when lower(sku)=lower($1) or barcode=$1 then 0 else 1 end, name
+       limit 50`,
+      [term, `%${term}%`]
+    ) as { rows: Product[] };
+    if (result.rows.length) return result.rows;
+  }
+
+  const url = new URL(`${BLING_API_URL}/produtos`);
+  url.searchParams.set('pagina', '1');
+  url.searchParams.set('limite', '100');
+  if (/^\d{8,14}$/.test(term)) url.searchParams.append('gtins[]', term);
+  else url.searchParams.set('pesquisa', term);
+  const response = await blingRequest(url.pathname.replace('/Api/v3', '') + url.search);
+  if (!response.ok) throw new Error(`Bling não retornou os produtos (HTTP ${response.status})`);
+  const result = records(await response.json()).map(normalizeProduct).filter((item): item is Product => Boolean(item));
+  void syncProducts().catch(() => undefined);
+  return result;
+};
+
+let sellersCache: { expires: number; data: Seller[] } | undefined;
+const fetchSellers = async (): Promise<Seller[]> => {
+  if (sellersCache && sellersCache.expires > Date.now()) return sellersCache.data;
+  const response = await blingRequest('/vendedores?pagina=1&limite=100');
+  if (!response.ok) throw new Error(`Bling não retornou os vendedores (HTTP ${response.status})`);
+  const data = records(await response.json()).map(row => ({
+    id: textValue(row.id) ?? '',
+    name: textValue(row.nome) ?? '',
+    active: activeValue(row.situacao ?? row.ativo)
+  })).filter(item => item.id && item.name && item.active);
+  sellersCache = { expires: Date.now() + 5 * 60_000, data };
+  return data;
+};
+let paymentsCache: { expires: number; data: PaymentMethod[] } | undefined;
+const fetchPayments = async (): Promise<PaymentMethod[]> => {
+  if (paymentsCache && paymentsCache.expires > Date.now()) return paymentsCache.data;
+  const response = await blingRequest('/formas-pagamentos?pagina=1&limite=100');
+  if (!response.ok) throw new Error(`Bling não retornou as formas de pagamento (HTTP ${response.status})`);
+  const data = records(await response.json()).map(row => ({
+    id: textValue(row.id) ?? '',
+    name: textValue(row.descricao ?? row.nome) ?? '',
+    type: textValue(row.tipoPagamento ?? row.tipo ?? row.categoria) ?? 'OTHER',
+    active: activeValue(row.situacao ?? row.ativo),
+    isDefault: row.padrao === true || row.padrao === 1,
+    source: 'BLING' as const
+  })).filter(item => item.id && item.name && item.active && !/fornecedor|supplier|compra|contas a pagar/i.test(`${item.name} ${item.type}`));
+  paymentsCache = { expires: Date.now() + 5 * 60_000, data };
+  return data;
+};
+const findBlingCustomer = async (cpf: string): Promise<BlingCustomer | undefined> => {
+  const document = cpf.replace(/\D/g, '');
+  const response = await blingRequest(`/contatos?pagina=1&limite=1&numeroDocumento=${encodeURIComponent(document)}`);
+  if (!response.ok) throw new Error(`Bling não retornou o cliente (HTTP ${response.status})`);
+  const raw = records(await response.json())[0];
+  if (!raw) return undefined;
+  const id = textValue(raw.id);
+  const name = textValue(raw.nome ?? raw.fantasia);
+  if (!id || !name) return undefined;
+  return { id, cpf: document, name, email: textValue(raw.email), phone: textValue(raw.celular ?? raw.telefone) };
+};
+const createOrder = async (input: { customerId?: string; sellerId: string; items: SaleItem[]; discount: number; paymentMethodId: string; idempotencyKey: string }) => {
+  const total = input.items.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0) - input.discount;
+  const payload = {
+    numeroLoja: input.idempotencyKey,
+    contato: input.customerId ? { id: Number(input.customerId) } : undefined,
+    vendedor: { id: Number(input.sellerId) },
+    itens: input.items.map(item => ({ codigo: item.sku, descricao: item.name, quantidade: item.quantity, valor: item.unitPrice })),
+    desconto: input.discount ? { valor: input.discount, unidade: 'REAL' } : undefined,
+    parcelas: [{ dataVencimento: new Date().toISOString().slice(0, 10), valor: total, formaPagamento: { id: Number(input.paymentMethodId) } }]
+  };
+  const response = await blingRequest('/pedidos/vendas', { method: 'POST', body: JSON.stringify(payload), headers: { 'Idempotency-Key': input.idempotencyKey } });
+  const body = await response.json() as { data?: { id?: string | number }; error?: unknown };
+  if (!response.ok || !body.data?.id) throw new Error(`Bling não criou o pedido (HTTP ${response.status})`);
+  return { id: String(body.data.id), status: 'CONFIRMED' as const };
+};
+
+const fidelizeiConfig = () => {
+  const url = process.env.FIDELIZEI_API_URL?.replace(/\/$/, '');
+  const key = process.env.FIDELIZEI_API_KEY;
+  if (!url || !key) throw new Error('Fidelizei não configurado');
+  return { url, key };
+};
+const fidelizeiRequest = async (path: string, init: RequestInit = {}) => {
+  const { url, key } = fidelizeiConfig();
+  const response = await fetch(`${url}${path}`, {
+    ...init,
+    headers: { Authorization: `Bearer ${key}`, 'x-api-key': key, Accept: 'application/json', 'Content-Type': 'application/json', ...(init.headers ?? {}) }
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`Fidelizei não respondeu à operação (HTTP ${response.status})${body ? `: ${body.slice(0, 160)}` : ''}`);
+  }
+  return response;
+};
+const unwrap = (payload: unknown) => {
+  const body = payload as { data?: unknown };
+  return body?.data ?? payload;
+};
+const mapFidelizeiCustomer = (payload: unknown, cpf: string): FidelizeiCustomer | undefined => {
+  const raw = unwrap(payload) as Record<string, unknown> | undefined;
+  if (!raw || Array.isArray(raw)) return undefined;
+  const id = textValue(raw.id ?? raw.customerId ?? raw.customer_id);
+  const name = textValue(raw.name ?? raw.nome);
+  if (!id || !name) return undefined;
+  const couponsRaw = Array.isArray(raw.coupons ?? raw.cupons) ? (raw.coupons ?? raw.cupons) as Record<string, unknown>[] : [];
+  return {
+    id,
+    cpf,
+    name,
+    tier: textValue(raw.tier ?? raw.category ?? raw.categoria) ?? 'Sem categoria',
+    points: numericValue(raw.points ?? raw.pontos ?? raw.saldo),
+    benefits: Array.isArray(raw.benefits ?? raw.beneficios) ? (raw.benefits ?? raw.beneficios) as string[] : [],
+    coupons: couponsRaw.map(item => ({
+      id: textValue(item.id) ?? '',
+      code: textValue(item.code ?? item.codigo) ?? '',
+      description: textValue(item.description ?? item.descricao) ?? '',
+      discount: numericValue(item.discount ?? item.desconto ?? item.valor)
+    })).filter(item => item.id && item.code)
+  };
+};
+
+export const getFidelizeiConnectionStatus = async () => {
+  try {
+    fidelizeiConfig();
+    const response = await fidelizeiRequest('/ready');
+    return { configured: true, connected: response.ok, mode: 'api-key' as const };
+  } catch (error) {
+    return { configured: Boolean(process.env.FIDELIZEI_API_URL && process.env.FIDELIZEI_API_KEY), connected: false, mode: 'api-key' as const, error: error instanceof Error ? error.message : 'Falha de conexão' };
+  }
+};
+
+export const bling = { products: searchProducts, syncProducts, sellers: fetchSellers, paymentMethods: fetchPayments, findCustomer: findBlingCustomer, createOrder };
+export const fidelizei = {
+  findCustomer: async (cpf: string) => {
+    const normalized = cpf.replace(/\D/g, '');
+    const response = await fidelizeiRequest(`/customers?cpf=${encodeURIComponent(normalized)}`);
+    return mapFidelizeiCustomer(await response.json(), normalized);
+  },
+  validateAndReserve: async (code: string, customerId: string, subtotal: number) => {
+    const response = await fidelizeiRequest('/coupons/reserve', { method: 'POST', body: JSON.stringify({ code, customerId, subtotal }) });
+    const data = unwrap(await response.json()) as Record<string, unknown>;
+    const couponRaw = (data.coupon ?? data.cupom) as Record<string, unknown>;
+    const coupon: Coupon = {
+      id: textValue(couponRaw.id) ?? '',
+      code: textValue(couponRaw.code ?? couponRaw.codigo) ?? code,
+      description: textValue(couponRaw.description ?? couponRaw.descricao) ?? 'Benefício Fidelizei',
+      discount: numericValue(couponRaw.discount ?? couponRaw.desconto ?? couponRaw.valor)
+    };
+    return { coupon, reservationId: textValue(data.reservationId ?? data.reservation_id) ?? '', expiresAt: textValue(data.expiresAt ?? data.expires_at) ?? '' };
+  },
+  consumeReservation: async (reservationId: string, saleId: string) => {
+    const response = await fidelizeiRequest('/coupons/consume', { method: 'POST', body: JSON.stringify({ reservationId, saleId }) });
+    const data = unwrap(await response.json()) as Record<string, unknown>;
+    return { transactionId: textValue(data.transactionId ?? data.transaction_id) ?? '', reservationId };
+  },
+  releaseReservation: async (reservationId: string) => {
+    await fidelizeiRequest('/coupons/release', { method: 'POST', body: JSON.stringify({ reservationId }) });
+  }
+};
