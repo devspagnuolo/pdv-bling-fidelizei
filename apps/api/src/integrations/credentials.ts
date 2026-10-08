@@ -2,6 +2,8 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:
 import { pool } from '../db.js';
 
 const BLING_TOKEN_URL = 'https://api.bling.com.br/Api/v3/oauth/token';
+const FETCH_TIMEOUT_MS = 15_000;
+let refreshInFlight: Promise<string | undefined> | undefined;
 type BlingTokenResponse = {
   access_token: string;
   refresh_token?: string;
@@ -53,7 +55,8 @@ const requestTokens = async (body: URLSearchParams): Promise<BlingTokenResponse>
       Accept: 'application/json',
       'enable-jwt': '1'
     },
-    body
+    body,
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)
   });
   const payload = await response.json() as BlingTokenResponse & {
     error?: { message?: string; description?: string } | string;
@@ -111,16 +114,26 @@ export const getBlingAccessToken = async (): Promise<string | undefined> => {
         const expiresAt = credential.expires_at?.getTime() ?? 0;
         if (expiresAt > Date.now() + 2 * 60_000) return decrypt(credential.access_token);
         if (!credential.refresh_token) throw new Error('Conexão Bling expirada e sem refresh token');
-        const tokens = await requestTokens(new URLSearchParams({
-          grant_type: 'refresh_token',
-          refresh_token: decrypt(credential.refresh_token)
-        }));
-        await saveBlingTokens(tokens);
-        return tokens.access_token;
+        if (!refreshInFlight) {
+          refreshInFlight = (async () => {
+            const tokens = await requestTokens(new URLSearchParams({
+              grant_type: 'refresh_token',
+              refresh_token: decrypt(credential.refresh_token!)
+            }));
+            await saveBlingTokens(tokens);
+            return tokens.access_token;
+          })().finally(() => { refreshInFlight = undefined; });
+        }
+        return await refreshInFlight;
       } catch (error) {
         const message = error instanceof Error ? error.message : '';
-        if (/authenticate data|bad decrypt|invalid/i.test(message)) {
-          await pool.query(`delete from integration_credentials where provider = 'BLING'`);
+        if (/authenticate data|bad decrypt|invalid|expired|revoked/i.test(message)) {
+          await pool.query(
+            `update integration_credentials
+             set metadata = metadata || $1::jsonb, updated_at = now()
+             where provider = 'BLING'`,
+            [JSON.stringify({ needsReauth: true, lastError: message.slice(0, 500) })]
+          );
           return process.env.BLING_ACCESS_TOKEN;
         }
         throw error;

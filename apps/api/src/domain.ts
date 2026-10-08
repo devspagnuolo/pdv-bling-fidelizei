@@ -38,9 +38,10 @@ export type SaleItem = { productId: string; sku: string; name: string; quantity:
 export type PaymentSplit = { paymentMethodId: string; paymentMethodName?: string; amount: number; receivedAmount?: number; change?: number };
 export type Sale = {
   id: string;
-  status: 'OPEN' | 'COMPLETED' | 'RECONCILIATION_REQUIRED';
+  status: 'OPEN' | 'PROCESSING' | 'COMPLETED' | 'SYNC_FAILED' | 'RECONCILIATION_REQUIRED';
   operatorId: string;
   sellerId: string;
+  cashSessionId: string;
   customer?: Customer;
   items: SaleItem[];
   coupon?: Coupon;
@@ -60,6 +61,7 @@ export type Sale = {
   blingOrderId?: string;
   fiscalStatus?: 'NOT_REQUESTED' | 'REQUESTED' | 'FAILED';
   fidelizeiTransactionId?: string;
+  lastError?: string;
   createdAt: string;
 };
 export const money = (n: number) => Math.round(n * 100) / 100;

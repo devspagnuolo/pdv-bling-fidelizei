@@ -1,7 +1,12 @@
 import pg from 'pg';
 
 export const pool = process.env.DATABASE_URL
-  ? new pg.Pool({ connectionString: process.env.DATABASE_URL })
+  ? new pg.Pool({
+      connectionString: process.env.DATABASE_URL,
+      max: Number(process.env.PG_POOL_MAX ?? 10),
+      statement_timeout: 15_000,
+      query_timeout: 20_000
+    })
   : undefined;
 
 export const initializeDatabase = async () => {
@@ -12,6 +17,8 @@ export const initializeDatabase = async () => {
     data jsonb not null,
     updated_at timestamptz not null default now()
   )`);
+  await pool.query("create index if not exists pdv_sales_cash_session_idx on pdv_sales ((data->>'cashSessionId'))");
+  await pool.query("create index if not exists pdv_sales_status_idx on pdv_sales (status, updated_at)");
   await pool.query(`create table if not exists integration_credentials (
     provider text primary key,
     access_token text not null,
