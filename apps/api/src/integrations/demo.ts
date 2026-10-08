@@ -220,7 +220,7 @@ export const bling = {
   }) => ({ id: `bling-order-${input.idempotencyKey}`, status: 'CONFIRMED' as const })
 };
 export const getFidelizeiConnectionStatus = async () => {
-  const baseUrl = process.env.FIDELIZAPLUS_API_URL?.replace(/\\/$/, '');
+  const baseUrl = process.env.FIDELIZAPLUS_API_URL?.replace(/\/$/, '');
   const token = process.env.FIDELIZAPLUS_API_TOKEN;
   if (!baseUrl || !token) return { configured: false, connected: false, mode: 'demo' as const };
   try {
