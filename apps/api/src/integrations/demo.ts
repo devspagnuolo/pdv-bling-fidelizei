@@ -100,7 +100,7 @@ const fetchPaymentMethods = async (): Promise<PaymentMethod[]> => {
     if (rows.length < 100) break;
   }
 
-  const activeMethods = collected.filter(method => method.active);
+  const activeMethods = collected.filter(method => method.active && !/fornecedor|supplier|compra|contas a pagar/i.test(`${method.name} ${method.type}`));
   if (!activeMethods.length) throw new Error('Nenhuma forma de pagamento ativa foi encontrada no Bling');
   paymentMethodCache = { expiresAt: Date.now() + PAYMENT_METHOD_CACHE_MS, data: activeMethods };
   return activeMethods;
@@ -136,7 +136,7 @@ const fetchProducts = async (query = ''): Promise<Product[]> => {
   const isBarcode = /^\\d{8,14}$/.test(normalizedQuery);
   // O Bling pagina as respostas em blocos de até 100. Percorremos todas as páginas
   // para que uma busca não fique restrita aos primeiros produtos do cadastro.
-  for (let page = 1; page <= 250; page += 1) {
+  for (let page = 1; page <= (isBarcode ? 10 : 1); page += 1) {
     const url = new URL(`${BLING_API_URL}/produtos`);
     url.searchParams.set('pagina', String(page));
     url.searchParams.set('limite', '100');
@@ -147,6 +147,10 @@ const fetchProducts = async (query = ''): Promise<Product[]> => {
     const response = await fetch(url, {
       headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json', 'enable-jwt': '1' }
     });
+    if (response.status === 429) {
+      await new Promise(resolve => setTimeout(resolve, 1200));
+      continue;
+    }
     if (!response.ok) throw new Error(`Bling não retornou os produtos (HTTP ${response.status})`);
     const payload = await response.json() as { data?: unknown };
     const rows = Array.isArray(payload.data) ? payload.data : [];
@@ -194,7 +198,16 @@ const findBlingCustomer = async (cpf: string): Promise<BlingCustomer | undefined
 
 export const bling = {
   products: fetchProducts,
-  sellers: async () => sellers,
+  sellers: async () => {
+    const accessToken = await getBlingAccessToken();
+    if (!accessToken) return sellers;
+    const response = await fetch(`${BLING_API_URL}/vendedores?pagina=1&limite=100`, { headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' } });
+    if (!response.ok) throw new Error(`Bling não retornou os vendedores (HTTP ${response.status})`);
+    const payload = await response.json() as { data?: unknown };
+    const rows = Array.isArray(payload.data) ? payload.data : [];
+    const result = rows.filter((row): row is Record<string, unknown> => Boolean(row) && typeof row === 'object').map(row => ({ id: valueAsText(row.id) ?? '', name: valueAsText(row.nome ?? row.name) ?? '', active: isActive(row.situacao ?? row.ativo) })).filter(v => v.id && v.name && v.active);
+    return result.length ? result : sellers;
+  },
   paymentMethods: fetchPaymentMethods,
   findCustomer: findBlingCustomer,
   createOrder: async (input: {
