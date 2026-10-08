@@ -34,7 +34,7 @@ export type Customer = {
   fidelizei?: FidelizeiCustomer;
   systems: { bling: LookupStatus; fidelizei: LookupStatus };
 };
-export type SaleItem = { productId: string; sku: string; name: string; quantity: number; unitPrice: number };
+export type SaleItem = { productId: string; sku: string; name: string; quantity: number; unitPrice: number; comment?: string };
 export type Sale = {
   id: string;
   status: 'OPEN' | 'COMPLETED' | 'RECONCILIATION_REQUIRED';
@@ -48,8 +48,13 @@ export type Sale = {
   paymentMethodName?: string;
   subtotal: number;
   discount: number;
+  manualDiscount?: number;
+  freight?: number;
+  observations?: string;
+  emitFiscal?: boolean;
   total: number;
   blingOrderId?: string;
+  fiscalStatus?: 'NOT_REQUESTED' | 'REQUESTED' | 'FAILED';
   fidelizeiTransactionId?: string;
   createdAt: string;
 };
