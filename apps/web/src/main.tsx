@@ -117,11 +117,11 @@ function App() {
   const add = (p: Product) => {
     const current = items.find(i => i.id === p.id);
     changeCart(current
-      ? items.map(i => i.id === p.id ? { ...i, quantity: Math.min(i.stock, i.quantity + 1) } : i)
+      ? items.map(i => i.id === p.id ? { ...i, quantity: i.quantity + 1 } : i)
       : [...items, { ...p, quantity: 1 }]);
   };
   const quantity = (id: string, delta: number) => changeCart(items
-    .map(i => i.id === id ? { ...i, quantity: Math.max(0, Math.min(i.stock, i.quantity + delta)) } : i)
+    .map(i => i.id === id ? { ...i, quantity: Math.max(0, i.quantity + delta) } : i)
     .filter(i => i.quantity > 0));
 
   const searchCatalog = async () => {
@@ -163,12 +163,26 @@ function App() {
     if (data.bling) return setMessage('Cliente localizado no Bling. Ainda não possui cadastro no Fidelizei.');
     setMessage('Cliente localizado no Fidelizei. Ainda não possui cadastro no Bling.');
   };
+  const newSale = () => {
+    setStep('product');
+    setItems([]);
+    setQuery('');
+    setProducts([]);
+    setCatalogSearchActive(false);
+    setCpf('');
+    setCustomer(undefined);
+    setCoupon('');
+    setSale(undefined);
+    setMessage('');
+    searchInputRef.current?.focus();
+  };
+
   const create = async () => {
     const r = await fetch(`${api}/sales`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        operatorId: 'operator-demo',
+        operatorId: seller,
         sellerId: seller,
         customerCpf: cpf,
         items: items.map(x => ({
@@ -215,9 +229,16 @@ function App() {
   };
 
   return <main>
-    <header>
+    <header className="pos-header">
       <div><small>PDV INDEPENDENTE · CAIXA 01</small><h1>Venda</h1></div>
-      <div className="header-actions"><span>Operador: Juliana S. · Caixa aberto</span><span className="status-pill online">Bling online</span><span className="status-pill online">Fideliza+ online</span><button className="secondary">Nova venda</button></div>
+      <div className="header-actions">
+        <label className="operator-select"><span>Operador / vendedor</span><select value={seller} onChange={e => setSeller(e.target.value)}>
+          <option value="">Selecione no Bling</option>{sellers.map(s => <option value={s.id} key={s.id}>{s.name}</option>)}
+        </select></label>
+        <span className={integrations?.bling.connected ? 'status-pill online' : 'status-pill offline'}>Bling {integrations?.bling.connected ? 'online' : 'offline'}</span>
+        <span className={integrations?.fidelizaPlus.connected ? 'status-pill online' : 'status-pill offline'}>Fidelizei {integrations?.fidelizaPlus.connected ? 'online' : 'offline'}</span>
+        <button className="secondary" onClick={newSale}>Nova venda</button>
+      </div>
     </header>
 
     <section className="integration-strip" aria-label="Status das integrações">
@@ -248,8 +269,8 @@ function App() {
             <button className="search-action" onClick={() => void searchCatalog()} disabled={searchingCatalog}>{searchingCatalog ? 'Buscando…' : 'Buscar'}</button>
           </div>
           <p className="scanner-hint">Leitor de código de barras conectado? Basta bipar e pressionar Enter.</p>
-          <div className="catalog">{filtered.map(p => <button className="product" disabled={!p.stock} onClick={() => add(p)} key={p.id}>
-            <span><b>{p.name}</b><small>{p.sku}{p.barcode ? ` · ${p.barcode}` : ''} · {p.stock} em estoque</small></span><strong>{brl.format(p.price)}</strong>
+          <div className="catalog">{filtered.map(p => <button className={p.stock <= 0 ? "product out-of-stock" : "product"} onClick={() => add(p)} key={p.id}>
+            <span><b>{p.name}</b><small>{p.sku}{p.barcode ? ` · ${p.barcode}` : ''} · <em className={p.stock <= 0 ? "stock zero" : "stock"}>{p.stock <= 0 ? "Sem estoque" : `${p.stock} em estoque`}</em></small></span><strong>{brl.format(p.price)}</strong>
           </button>)}</div>
           {catalogSearchActive && <div className="catalog-result-count">{products.length} produto(s) encontrado(s)</div>}
           {!catalogSearchActive && <div className="empty-state product-empty">Pesquise um produto para começar. O catálogo completo não é carregado no caixa.</div>}
@@ -312,9 +333,6 @@ function App() {
             {!paymentMethods.length && <div className="empty-state compact">Nenhuma forma de pagamento disponível.</div>}
           </section>
 
-          <label>Vendedor<select value={seller} onChange={e => setSeller(e.target.value)}>
-            <option value="">Selecione o vendedor</option>{sellers.map(s => <option value={s.id} key={s.id}>{s.name}</option>)}
-          </select></label>
           <div className="summary">
             <span>Cliente <b>{customer?.name ?? 'Não identificado'}</b></span>
             <span>Pagamento <b>{selectedPaymentMethod?.name ?? 'Selecione'}</b></span>
