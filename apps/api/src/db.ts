@@ -26,5 +26,17 @@ export const initializeDatabase = async () => {
     expires_at timestamptz not null,
     created_at timestamptz not null default now()
   )`);
+  await pool.query(`create table if not exists bling_products (
+    id text primary key,
+    sku text not null,
+    name text not null,
+    price numeric(14,2) not null default 0,
+    stock numeric(14,4) not null default 0,
+    barcode text,
+    synced_at timestamptz not null default now()
+  )`);
+  await pool.query('create index if not exists bling_products_sku_idx on bling_products (lower(sku))');
+  await pool.query('create index if not exists bling_products_barcode_idx on bling_products (barcode)');
+  await pool.query('create index if not exists bling_products_name_idx on bling_products using gin (to_tsvector(\'simple\', name))');
   await pool.query('delete from oauth_states where expires_at < now()');
 };
