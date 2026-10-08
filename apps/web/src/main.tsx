@@ -35,8 +35,9 @@ type CustomerLookup = {
 type IntegrationStatus = {
   bling: { configured: boolean; connected: boolean; mode: string; expiresAt?: string };
   fidelizaPlus: { configured: boolean; connected: boolean; mode: string };
+  fiscal?: { configured: boolean; available: boolean; source: 'BLING' };
 };
-type Item = Product & { quantity: number };
+type Item = Product & { quantity: number; comment?: string };
 type Step = 'product' | 'customer' | 'payment';
 const brl = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' });
 
@@ -68,6 +69,11 @@ function App() {
   const [coupon, setCoupon] = useState('');
   const [sale, setSale] = useState<any>();
   const [paymentMethodId, setPaymentMethodId] = useState('');
+  const [discountMode, setDiscountMode] = useState<'value' | 'percent'>('value');
+  const [discountInput, setDiscountInput] = useState('0');
+  const [freightInput, setFreightInput] = useState('0');
+  const [observations, setObservations] = useState('');
+  const [emitFiscal, setEmitFiscal] = useState(true);
   const [message, setMessage] = useState('');
   const searchInputRef = useRef<HTMLInputElement>(null);
 
@@ -104,7 +110,12 @@ function App() {
   }, []);
 
   const subtotal = useMemo(() => items.reduce((n, x) => n + x.price * x.quantity, 0), [items]);
-  const total = sale?.total ?? subtotal;
+  const numericDiscount = Math.max(0, Number(discountInput.replace(',', '.')) || 0);
+  const manualDiscount = Math.min(subtotal, discountMode === 'percent' ? subtotal * Math.min(100, numericDiscount) / 100 : numericDiscount);
+  const freight = Math.max(0, Number(freightInput.replace(',', '.')) || 0);
+  const effectiveDiscount = sale?.discount ?? manualDiscount;
+  const effectiveFreight = sale?.freight ?? freight;
+  const total = sale?.total ?? Math.max(0, subtotal - manualDiscount + freight);
   const filtered = catalogSearchActive
     ? products
     : products.filter(p => `${p.name} ${p.sku} ${p.barcode ?? ''}`.toLowerCase().includes(query.toLowerCase()));
@@ -130,6 +141,7 @@ function App() {
   const quantity = (id: string, delta: number) => changeCart(items
     .map(i => i.id === id ? { ...i, quantity: Math.max(0, i.quantity + delta) } : i)
     .filter(i => i.quantity > 0));
+  const commentItem = (id: string, comment: string) => changeCart(items.map(i => i.id === id ? { ...i, comment } : i));
 
   const searchCatalog = async () => {
     const term = query.trim();
@@ -183,6 +195,11 @@ function App() {
     setCustomer(undefined);
     setCoupon('');
     setSale(undefined);
+    setDiscountMode('value');
+    setDiscountInput('0');
+    setFreightInput('0');
+    setObservations('');
+    setEmitFiscal(true);
     setMessage('');
     searchInputRef.current?.focus();
   };
@@ -215,13 +232,18 @@ function App() {
       body: JSON.stringify({
         operatorId: seller,
         sellerId: seller,
-        customerCpf: cpf,
+        customerCpf: customer?.found ? customer.cpf : undefined,
+        manualDiscount,
+        freight,
+        observations,
+        emitFiscal,
         items: items.map(x => ({
           productId: x.id,
           sku: x.sku,
           name: x.name,
           quantity: x.quantity,
-          unitPrice: x.price
+          unitPrice: x.price,
+          comment: x.comment
         }))
       })
     });
@@ -255,8 +277,8 @@ function App() {
     if (!r.ok) return setMessage(data.message ?? 'Não foi possível concluir a venda.');
     setSale(data);
     setMessage(data.status === 'COMPLETED'
-      ? `Venda concluída. Pedido Bling: ${data.blingOrderId}`
-      : 'Pedido criado; a fidelidade exige reconciliação.');
+      ? `Venda concluída. Pedido Bling: ${data.blingOrderId}${data.fiscalStatus === 'REQUESTED' ? ' · NFC-e solicitada ao Bling.' : data.fiscalStatus === 'FAILED' ? ' · Pedido salvo, mas a NFC-e precisa ser verificada no Bling.' : ''}`
+      : 'Pedido criado; a fidelidade exige reconciliação automática.');
   };
 
   return <main>
@@ -312,6 +334,7 @@ function App() {
         {step === 'customer' && <>
           <div className="section-title"><div><small>ETAPA 2</small><h2>Identificar cliente</h2></div><span>Bling + Fidelizei</span></div>
           <label>CPF<div className="row"><input value={cpf} onChange={e => { setCpf(e.target.value); setCustomer(undefined); setSale(undefined); setMessage(''); }} placeholder="000.000.000-00" /><button onClick={lookup}>Consultar</button></div></label>
+          {!customer && <div className="customer-card final-consumer"><div><span className="vip">PADRÃO BLING</span><h3>Consumidor Final</h3><p>Identificação opcional. A venda pode seguir normalmente sem CPF.</p></div><button onClick={() => setStep('payment')}>Continuar sem identificar</button></div>}
           {customer?.found ? <div className="customer-card unified">
             <div className="customer-identity">
               <div className="source-badges">
@@ -341,9 +364,9 @@ function App() {
                 </div>}
               </>}
             </div>
-          </div> : <div className="empty-state">Informe o CPF para consultar simultaneamente o Bling e o Fidelizei.</div>}
+          </div> : customer ? <div className="empty-state">Cliente não localizado. Continue como Consumidor Final ou revise o CPF.</div> : null}
           <label>Cupom Fidelizei<div className="row"><input disabled={!loyaltyCustomer} value={coupon} onChange={e => setCoupon(e.target.value.toUpperCase())} placeholder={loyaltyCustomer ? 'Digite o código do cupom' : 'Disponível para clientes Fidelizei'} /><button disabled={!loyaltyCustomer || !coupon} onClick={applyCoupon}>Aplicar cupom</button></div></label>
-          <div className="nav-actions"><button className="secondary" onClick={() => setStep('product')}>Voltar</button><button className="next" disabled={!customer?.found} onClick={() => setStep('payment')}>Continuar para pagamento</button></div>
+          <div className="nav-actions"><button className="secondary" onClick={() => setStep('product')}>Voltar</button><button className="next" disabled={!items.length} onClick={() => setStep('payment')}>{customer?.found ? 'Continuar para pagamento' : 'Continuar como Consumidor Final'}</button></div>
         </>}
 
         {step === 'payment' && <>
@@ -353,9 +376,14 @@ function App() {
           </div>
           <div className="totals-grid">
             <div><small>Subtotal</small><b>{brl.format(subtotal)}</b></div>
-            <div><small>Desconto</small><b>{brl.format(sale?.discount ?? 0)}</b></div>
+            <div><small>Desconto</small><b>{brl.format(effectiveDiscount)}</b></div>
+            <div><small>Frete / adicional</small><b>{brl.format(effectiveFreight)}</b></div>
             <div className="grand"><small>Total da venda</small><b>{brl.format(total)}</b></div>
           </div>
+          <section className="commercial-terms">
+            <div className="field-group"><label>Desconto manual</label><div className="discount-control"><select value={discountMode} disabled={Boolean(sale?.coupon)} onChange={e => { setDiscountMode(e.target.value as 'value' | 'percent'); setSale(undefined); }}><option value="value">R$ valor</option><option value="percent">% percentual</option></select><input value={discountInput} disabled={Boolean(sale?.coupon)} inputMode="decimal" onChange={e => { setDiscountInput(e.target.value); setSale(undefined); }} /></div></div>
+            <div className="field-group"><label>Frete / valor adicional</label><input value={freightInput} disabled={Boolean(sale?.coupon)} inputMode="decimal" onChange={e => { setFreightInput(e.target.value); setSale(undefined); }} /></div>
+          </section>
 
           <section className="payment-section">
             <div className="payment-heading">
@@ -369,6 +397,13 @@ function App() {
             {!paymentMethods.length && <div className="empty-state compact">Nenhuma forma de pagamento disponível.</div>}
           </section>
 
+          <section className="sale-details">
+            <label>Vendedor do Bling<select value={seller} onChange={e => { setSeller(e.target.value); setSale(undefined); }}><option value="">Selecione o vendedor responsável</option>{sellers.map(item => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
+            {!sellers.length && <p className="inline-warning">Nenhum vendedor retornado pelo Bling. Reconecte a integração e atualize a página.</p>}
+            <label>Observações da venda<textarea value={observations} onChange={e => { setObservations(e.target.value); setSale(undefined); }} placeholder="Ex.: venda online, retirada, instruções de troca ou entrega" /></label>
+            <label className="fiscal-check"><input type="checkbox" checked={emitFiscal} onChange={e => { setEmitFiscal(e.target.checked); setSale(undefined); }} /><span><b>Gerar NFC-e ao finalizar</b><small>Usa a configuração fiscal cadastrada no Bling.</small></span></label>
+            {emitFiscal && integrations?.fiscal && !integrations.fiscal.available && <p className="inline-warning">O acesso fiscal do Bling não está disponível para esta conexão.</p>}
+          </section>
           <div className="summary">
             <span>Cliente <b>{customer?.name ?? 'Não identificado'}</b></span>
             <span>Pagamento <b>{selectedPaymentMethod?.name ?? 'Selecione'}</b></span>
@@ -382,13 +417,14 @@ function App() {
       <aside className="cart">
         <div className="cart-title"><div><small>PEDIDO ATUAL</small><h2>Itens da venda</h2></div><span>{items.reduce((n, i) => n + i.quantity, 0)}</span></div>
         <div className="cart-items">{items.length ? items.map(i => <div className="cart-item" key={i.id}>
-          <div><b>{i.name}</b><small>{i.sku} · {brl.format(i.price)} un.</small></div>
+          <div className="cart-product-info"><b>{i.name}</b><small>{i.sku} · {brl.format(i.price)} un.</small><input className="item-comment" value={i.comment ?? ''} onChange={e => commentItem(i.id, e.target.value)} placeholder="Comentário do item (opcional)" /></div>
           <div className="qty"><button onClick={() => quantity(i.id, -1)}>−</button><span>{i.quantity}</span><button onClick={() => quantity(i.id, 1)}>+</button></div>
           <strong>{brl.format(i.price * i.quantity)}</strong>
         </div>) : <div className="empty-cart"><span>🛍️</span><p>Nenhum produto adicionado</p></div>}</div>
         <div className="cart-summary-card">
           <div><span>Subtotal</span><b>{brl.format(subtotal)}</b></div>
-          {(sale?.discount ?? 0) > 0 && <div className="discount-line"><span>Desconto</span><b>− {brl.format(sale?.discount ?? 0)}</b></div>}
+          {effectiveDiscount > 0 && <div className="discount-line"><span>Desconto</span><b>− {brl.format(effectiveDiscount)}</b></div>}
+          {effectiveFreight > 0 && <div><span>Frete / adicional</span><b>+ {brl.format(effectiveFreight)}</b></div>}
           <div className="cart-total"><span>Total</span><strong>{brl.format(total)}</strong></div>
           {step === 'product' && <button className="cart-primary" disabled={!items.length} onClick={() => setStep('customer')}>Identificar cliente <kbd>F4</kbd></button>}
           {step === 'customer' && <button className="cart-primary" disabled={!items.length} onClick={() => setStep('payment')}>Ir para pagamento <kbd>F10</kbd></button>}
