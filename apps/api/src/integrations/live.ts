@@ -170,13 +170,16 @@ const createOrder = async (input: { customerId?: string; sellerId: string; items
       observacao: item.comment || undefined
     })),
     desconto: input.discount ? { valor: input.discount, unidade: 'REAL' } : undefined,
-    transporte: input.freight ? { fretePorConta: 0, valorFrete: input.freight } : undefined,
+    transporte: input.freight ? { fretePorConta: 0, frete: input.freight } : undefined,
     observacoes: input.observations || undefined,
     parcelas: [{ dataVencimento: new Date().toISOString().slice(0, 10), valor: total, formaPagamento: { id: Number(input.paymentMethodId) } }]
   };
   const response = await blingRequest('/pedidos/vendas', { method: 'POST', body: JSON.stringify(payload), headers: { 'Idempotency-Key': input.idempotencyKey } });
-  const body = await response.json() as { data?: { id?: string | number }; error?: unknown };
-  if (!response.ok || !body.data?.id) throw new Error(`Bling não criou o pedido (HTTP ${response.status})`);
+  const body = await response.json() as { data?: { id?: string | number }; error?: unknown; message?: string; retorno?: unknown };
+  if (!response.ok || !body.data?.id) {
+    const detail = body.message ?? (typeof body.error === 'string' ? body.error : body.retorno ? JSON.stringify(body.retorno) : '');
+    throw new Error(`Bling não criou o pedido (HTTP ${response.status})${detail ? `: ${detail.slice(0, 260)}` : ''}`);
+  }
   return { id: String(body.data.id), status: 'CONFIRMED' as const };
 };
 const generateNfce = async (orderId: string) => {
