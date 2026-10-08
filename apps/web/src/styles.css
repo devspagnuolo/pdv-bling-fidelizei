@@ -250,3 +250,10 @@ kbd { padding: 3px 7px; border: 1px solid #d4ddd7; border-bottom-width: 2px; bor
   .status-pill { display: none; }
   .integration-strip > div { min-width: 190px; }
 }
+
+.enrollment-box { display: grid; gap: 10px; margin-top: 14px; padding-top: 14px; border-top: 1px solid #d5e4da; }
+.enrollment-box input { margin: 0; background: #fff; }
+.enrollment-box button { border: 0; border-radius: 9px; padding: 10px 12px; background: #168c4d; color: #fff; font-weight: 800; }
+.enrollment-box button:disabled { opacity: .4; cursor: not-allowed; }
+.consent-check { display: flex; align-items: flex-start; gap: 9px; margin: 0; font-size: 11px; line-height: 1.4; font-weight: 600; color: #4e5e54; }
+.consent-check input { width: 16px; height: 16px; flex: 0 0 auto; margin-top: 1px; }
