@@ -15,9 +15,11 @@ const app = Fastify({ logger: true });
 await app.register(cors, { origin: true });
 const sales = new Map<string, Sale>();
 const badRequest = (message: string): never => { throw Object.assign(new Error(message), { statusCode: 400 }); };
-const calculate = (items: SaleItem[], discount = 0) => {
+const calculate = (items: SaleItem[], discount = 0, freight = 0) => {
   const subtotal = money(items.reduce((n, i) => n + i.quantity * i.unitPrice, 0));
-  return { subtotal, discount, total: money(Math.max(0, subtotal - discount)) };
+  const safeDiscount = money(Math.min(subtotal, Math.max(0, discount)));
+  const safeFreight = money(Math.max(0, freight));
+  return { subtotal, discount: safeDiscount, freight: safeFreight, total: money(Math.max(0, subtotal - safeDiscount + safeFreight)) };
 };
 const lookupCustomer = async (cpf: string): Promise<Customer> => {
   const normalizedCpf = cpf.replace(/\D/g, '');
@@ -64,6 +66,15 @@ const getSale = async (id: string) => {
 };
 const reconcileFidelizeiSale = async (sale: Sale) => {
   if (sale.status !== 'RECONCILIATION_REQUIRED' || !sale.blingOrderId) return;
+  if (sale.emitFiscal) {
+    try {
+      await bling.generateNfce(order.id);
+      sale.fiscalStatus = 'REQUESTED';
+    } catch (error) {
+      sale.fiscalStatus = 'FAILED';
+      app.log.error({ error, saleId: sale.id, blingOrderId: order.id }, 'Pedido criado, mas a NFC-e não foi gerada no Bling');
+    }
+  }
   try {
     const tx = await fidelizei.registerSale({
       externalSaleId: sale.id,
@@ -92,7 +103,8 @@ void reconcilePendingSales().catch(error => app.log.error(error, 'Falha na recon
 app.get('/health', async () => ({ ok: true, persistence: pool ? 'postgres' : 'memory' }));
 app.get('/integrations/status', async () => ({
   bling: await getBlingConnectionStatus(),
-  fidelizaPlus: await getFidelizeiConnectionStatus()
+  fidelizaPlus: await getFidelizeiConnectionStatus(),
+  fiscal: await bling.getFiscalCapability()
 }));
 app.get('/integrations/bling/connect', async (_req, reply) => {
   const clientId = process.env.BLING_CLIENT_ID;
@@ -131,20 +143,35 @@ app.post('/customers/fidelizei', async (req) => {
   return fidelizei.upsertCustomer(body);
 });
 app.post('/sales', async (req) => {
-  const body = req.body as { operatorId: string; sellerId: string; items: SaleItem[]; customerCpf?: string };
-  if (!body.operatorId || !body.sellerId || !body.items?.length) {
-    return badRequest('Operador, vendedor e itens são obrigatórios');
+  const body = req.body as {
+    operatorId?: string;
+    sellerId: string;
+    items: SaleItem[];
+    customerCpf?: string;
+    manualDiscount?: number;
+    freight?: number;
+    observations?: string;
+    emitFiscal?: boolean;
+  };
+  if (!body.sellerId || !body.items?.length) {
+    return badRequest('Vendedor e itens são obrigatórios');
   }
   const lookup = body.customerCpf ? await lookupCustomer(body.customerCpf) : undefined;
   const customer = lookup?.found ? lookup : undefined;
-  const amounts = calculate(body.items);
+  const manualDiscount = money(Math.max(0, Number(body.manualDiscount) || 0));
+  const freight = money(Math.max(0, Number(body.freight) || 0));
+  const amounts = calculate(body.items, manualDiscount, freight);
   const sale: Sale = {
     id: randomUUID(),
     status: 'OPEN',
-    operatorId: body.operatorId,
+    operatorId: body.operatorId || body.sellerId,
     sellerId: body.sellerId,
     customer,
     items: body.items,
+    manualDiscount,
+    observations: body.observations?.trim() || undefined,
+    emitFiscal: body.emitFiscal !== false,
+    fiscalStatus: body.emitFiscal === false ? 'NOT_REQUESTED' : undefined,
     ...amounts,
     createdAt: new Date().toISOString()
   };
@@ -160,7 +187,7 @@ app.post('/sales/:id/coupon', async (req) => {
   Object.assign(sale, {
     coupon: reservation.coupon,
     reservationId: reservation.reservationId,
-    ...calculate(sale.items, reservation.coupon.discount)
+    ...calculate(sale.items, (sale.manualDiscount ?? 0) + reservation.coupon.discount, sale.freight ?? 0)
   });
   await persist(sale);
   return sale;
@@ -180,6 +207,8 @@ app.post('/sales/:id/complete', async (req) => {
     sellerId: sale.sellerId,
     items: sale.items,
     discount: sale.discount,
+    freight: sale.freight ?? 0,
+    observations: sale.observations,
     paymentMethodId: paymentMethod.id,
     idempotencyKey: sale.id
   });
