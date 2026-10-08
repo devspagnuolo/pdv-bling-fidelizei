@@ -219,6 +219,20 @@ export const bling = {
     idempotencyKey: string;
   }) => ({ id: `bling-order-${input.idempotencyKey}`, status: 'CONFIRMED' as const })
 };
+export const getFidelizeiConnectionStatus = async () => {
+  const baseUrl = process.env.FIDELIZAPLUS_API_URL?.replace(/\\/$/, '');
+  const token = process.env.FIDELIZAPLUS_API_TOKEN;
+  if (!baseUrl || !token) return { configured: false, connected: false, mode: 'demo' as const };
+  try {
+    const response = await fetch(`${baseUrl}/ready`, {
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' }
+    });
+    return { configured: true, connected: response.ok, mode: 'api-token' as const, statusCode: response.status };
+  } catch {
+    return { configured: true, connected: false, mode: 'api-token' as const };
+  }
+};
+
 export const fidelizei = {
   findCustomer: async (cpf: string) => cpf.replace(/\D/g, '') === fidelizeiCustomer.cpf ? fidelizeiCustomer : undefined,
   validateAndReserve: async (code: string, customerId: string, subtotal: number) => {
