@@ -280,7 +280,7 @@ function App() {
       </div>
       <div>
         <span className={integrations?.fidelizaPlus.connected ? 'integration-dot online' : 'integration-dot'} />
-        <div><b>Fideliza+</b><small>{integrations?.fidelizaPlus.connected ? 'Conectado ao PDV' : 'Configuração pendente'}</small></div>
+        <div><b>Fidelizei</b><small>{integrations?.fidelizaPlus.connected ? 'Conectado ao PDV' : 'Configuração pendente'}</small></div>
       </div>
       <span className="integration-note">Credenciais protegidas no servidor</span>
     </section>
