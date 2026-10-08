@@ -89,6 +89,12 @@ app.get('/catalog/products', async (req) => {
 app.get('/catalog/sellers', async () => bling.sellers());
 app.get('/catalog/payment-methods', async () => bling.paymentMethods());
 app.get('/customers/:cpf', async (req) => lookupCustomer((req.params as { cpf: string }).cpf));
+app.post('/customers/fidelizei', async (req) => {
+  const body = req.body as { name: string; cpf: string; phone?: string; email?: string; programConsent: boolean };
+  if (!body.name || !body.cpf || body.programConsent !== true) return badRequest('Nome, CPF e consentimento explícito são obrigatórios para adesão');
+  if (!body.phone) return badRequest('Celular é obrigatório para adesão ao Fidelizei');
+  return fidelizei.upsertCustomer(body);
+});
 app.post('/sales', async (req) => {
   const body = req.body as { operatorId: string; sellerId: string; items: SaleItem[]; customerCpf?: string };
   if (!body.operatorId || !body.sellerId || !body.items?.length) {
@@ -115,7 +121,7 @@ app.post('/sales/:id/coupon', async (req) => {
   const { code } = req.body as { code: string };
   const fidelizeiCustomer = sale?.customer?.fidelizei;
   if (!sale || !fidelizeiCustomer) return badRequest('Cliente não cadastrado no Fidelizei');
-  const reservation = await fidelizei.validateAndReserve(code, fidelizeiCustomer.id, sale.subtotal);
+  const reservation = await fidelizei.validateAndReserve(code, sale.id, sale.subtotal);
   Object.assign(sale, {
     coupon: reservation.coupon,
     reservationId: reservation.reservationId,
@@ -143,17 +149,28 @@ app.post('/sales/:id/complete', async (req) => {
     idempotencyKey: sale.id
   });
   try {
-    const tx = sale.reservationId ? await fidelizei.consumeReservation(sale.reservationId, sale.id) : undefined;
+    const tx = await fidelizei.registerSale({
+      externalSaleId: sale.id,
+      orderNumber: order.id,
+      customerCpf: sale.customer?.cpf,
+      total: sale.total,
+      occurredAt: new Date().toISOString()
+    });
     Object.assign(sale, {
       status: 'COMPLETED',
       blingOrderId: order.id,
-      fidelizeiTransactionId: tx?.transactionId
+      fidelizeiTransactionId: tx.transactionId
     });
   } catch {
     Object.assign(sale, { status: 'RECONCILIATION_REQUIRED', blingOrderId: order.id });
   }
   await persist(sale);
   return sale;
+});
+app.post('/sales/:id/reverse-fidelizei', async (req) => {
+  const sale = sales.get((req.params as { id: string }).id);
+  if (!sale?.fidelizeiTransactionId) return badRequest('Venda sem transação Fidelizei para estorno');
+  return fidelizei.reverseSale(sale.id);
 });
 app.post('/webhooks/:provider', async (req) => ({
   accepted: true,
