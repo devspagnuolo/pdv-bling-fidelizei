@@ -338,12 +338,12 @@ app.post('/cash/sessions/open', async (req) => {
      values ($1,$2,$3,$4,$5,'OPEN',$6)`,
     [sessionId, operatorId, body.sellerId ?? operatorId, account.id, account.name, openingAmount]
   );
+  await database.query(
+    `insert into pdv_cash_operations (id, session_id, operation_type, amount, data)
+     values ($1,$2,'OPENING',$3,$4::jsonb)`,
+    [operationId, sessionId, openingAmount, JSON.stringify({ account, syncStatus: openingAmount > 0 ? 'PENDING' : 'NOT_REQUIRED' })]
+  );
   if (openingAmount > 0) {
-    await database.query(
-      `insert into pdv_cash_operations (id, session_id, operation_type, amount, data)
-       values ($1,$2,'OPENING',$3,$4::jsonb)`,
-      [operationId, sessionId, openingAmount, JSON.stringify({ account, syncStatus: 'PENDING' })]
-    );
     try {
       const entry = await bling.createCashEntry({
         type: 'OPENING', amount: openingAmount, accountId: account.id,
@@ -423,6 +423,30 @@ app.get('/cash/day', async (req) => {
     canClose: snapshot.pendingSales === 0
   };
 });
+app.get('/cash/control', async (req) => {
+  const query = req.query as { sessionId?: string };
+  if (!query.sessionId) return badRequest('Informe a sessão de caixa');
+  const snapshot = await cashSessionSnapshot(query.sessionId);
+  const sales = snapshot.salesRows.map((row: { data: Sale }) => ({
+    id: row.data.id,
+    orderId: row.data.blingOrderId,
+    orderNumber: row.data.blingOrderNumber,
+    createdAt: row.data.createdAt,
+    total: row.data.total,
+    status: row.data.status,
+    payments: row.data.payments ?? []
+  }));
+  return {
+    session: snapshot.session,
+    sales,
+    salesCount: sales.length,
+    salesTotal: money(sales.reduce((sum: number, sale: { total: number }) => sum + sale.total, 0)),
+    paymentTotals: snapshot.paymentTotals,
+    operations: snapshot.operations,
+    expectedCash: snapshot.expectedCash,
+    pendingSales: snapshot.pendingSales
+  };
+});
 app.post('/cash/sessions/:id/close', async (req) => {
   requireManager(req);
   const id = (req.params as { id: string }).id;
@@ -455,10 +479,22 @@ app.post('/cash/sessions/:id/close', async (req) => {
     notes: body.notes?.trim() || undefined,
     blingEntries: entries
   };
-  await database.query(
-    `update pdv_cash_sessions set status='CLOSED', closed_at=now(), closing_summary=$2::jsonb where id=$1 and status='OPEN'`,
-    [id, JSON.stringify(summary)]
-  );
+  await database.query('begin');
+  try {
+    await database.query(
+      `update pdv_cash_sessions set status='CLOSED', closed_at=now(), closing_summary=$2::jsonb where id=$1 and status='OPEN'`,
+      [id, JSON.stringify(summary)]
+    );
+    await database.query(
+      `insert into pdv_cash_operations (id, session_id, operation_type, amount, data)
+       values ($1,$2,'CLOSING',0,$3::jsonb)`,
+      [randomUUID(), id, JSON.stringify({ syncStatus: 'NOT_REQUIRED', summary })]
+    );
+    await database.query('commit');
+  } catch (error) {
+    await database.query('rollback');
+    throw error;
+  }
   return { closed: true, sessionId: id, summary };
 });
 
@@ -667,6 +703,7 @@ app.post('/sales/:id/complete', async (req) => {
       idempotencyKey: sale.id
     });
     sale.blingOrderId = order.id;
+    sale.blingOrderNumber = order.number;
     if (pool) await pool.query(
       `update bling_products product set stock=product.stock-item.quantity
        from jsonb_to_recordset($1::jsonb) as item("productId" text, quantity numeric)
@@ -675,8 +712,9 @@ app.post('/sales/:id/complete', async (req) => {
     );
     if (sale.emitFiscal) {
       try {
-        await bling.generateNfce(order.id);
+        const fiscal = await bling.generateNfce(order.id);
         sale.fiscalStatus = 'REQUESTED';
+        sale.fiscalDocumentUrl = fiscal.documentUrl;
       } catch (error) {
         sale.fiscalStatus = 'FAILED';
         app.log.error({ error, saleId: sale.id, blingOrderId: order.id }, 'Pedido criado, mas a NFC-e não foi gerada no Bling');
@@ -688,7 +726,7 @@ app.post('/sales/:id/complete', async (req) => {
       try {
         const tx = await fidelizei.registerSale({
           externalSaleId: sale.id,
-          orderNumber: order.id,
+          orderNumber: order.number ?? order.id,
           customerCpf: sale.customer.cpf,
           total: sale.total,
           occurredAt: new Date().toISOString()
