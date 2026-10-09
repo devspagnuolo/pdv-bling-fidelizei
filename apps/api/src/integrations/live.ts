@@ -142,7 +142,8 @@ const fetchSalesChannels = async () => {
   if (salesChannelsCache && salesChannelsCache.expires > Date.now()) return salesChannelsCache.data;
   const response = await blingRequest('/canais-venda?pagina=1&limite=100');
   if (response.status === 401 || response.status === 403) {
-    const data = [{ id: 'DEFAULT', name: 'Configuração padrão do Bling', active: true }];
+    const data: { id: string; name: string; businessUnitId?: string; businessUnitName?: string; active: boolean }[] =
+      [{ id: 'DEFAULT', name: 'Configuração padrão do Bling', active: true }];
     salesChannelsCache = { expires: Date.now() + 5 * 60_000, data };
     return data;
   }
