@@ -691,3 +691,11 @@ textarea:focus {
 .dialog-actions{display:grid;grid-template-columns:1fr 2fr;gap:12px}.operations-menu button:disabled{opacity:.45;cursor:not-allowed}
 @media(max-width:900px){.closing-summary{grid-template-columns:1fr}.counted-list>div{grid-template-columns:1fr}.counted-list strong{text-align:left}.cash-status{width:100%}}
 @media print{.operation-overlay{display:none!important}}
+
+.opening-notice{display:flex;gap:8px;flex-direction:column;padding:16px;border:1px solid #d6a92a;border-radius:14px;background:#fff8df;color:#49360a}
+.opening-notice b{font-size:18px}.opening-notice span{color:#6f6040}
+.opening-routing{border:1px solid var(--line);border-radius:12px;padding:10px 12px;background:#fafafa}
+.opening-routing summary{cursor:pointer;font-weight:700;color:var(--muted)}
+.opening-routing[open] summary{margin-bottom:12px}
+.cash-control .closing-summary{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media(max-width:800px){.cash-control .closing-summary{grid-template-columns:repeat(2,minmax(0,1fr))}}
