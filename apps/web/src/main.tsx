@@ -52,7 +52,7 @@ type CashDay = {
   pendingSales: number;
   canClose?: boolean;
 };
-type OperationModal = 'open' | 'withdrawal' | 'supply' | 'close' | 'return';
+type OperationModal = 'open' | 'withdrawal' | 'supply' | 'close' | 'return' | 'pending';
 type Step = 'product' | 'customer' | 'payment';
 const newPaymentKey = () => globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
 const numberValue = (value: string) => Math.max(0, Number(value.replace(',', '.')) || 0);
@@ -99,6 +99,7 @@ function App() {
   const [operationBusy, setOperationBusy] = useState(false);
   const [completing, setCompleting] = useState(false);
   const [recentSales, setRecentSales] = useState<any[]>([]);
+  const [pendingOperations, setPendingOperations] = useState<any>();
   const [receipt, setReceipt] = useState<any>();
   const [discountMode, setDiscountMode] = useState<'value' | 'percent'>('value');
   const [discountInput, setDiscountInput] = useState('0');
@@ -453,6 +454,14 @@ function App() {
     if (type === 'return') {
       fetch(`${api}/sales/recent?limit=15`).then(response => response.json()).then(setRecentSales).catch(() => setRecentSales([]));
     }
+    if (type === 'pending') {
+      setPendingOperations(undefined);
+      fetch(`${api}/operations/pending`).then(async response => {
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.message ?? 'Não foi possível consultar pendências.');
+        return data;
+      }).then(setPendingOperations).catch(error => setMessage(error instanceof Error ? error.message : 'Falha ao consultar pendências.'));
+    }
   };
   const openCash = async () => {
     if (!seller || !selectedAccount) return setMessage('Selecione o operador e a conta financeira do Bling.');
@@ -526,6 +535,7 @@ function App() {
             <button onClick={() => printReceipt()} disabled={!sale?.blingOrderId}><span>▣</span><div>Imprimir<small>Comprovante da venda atual</small></div></button>
             <button onClick={() => void reprintLast()}><span>▤</span><div>Reimprimir última operação<small>Busca a última venda concluída</small></div></button>
             <button onClick={() => openOperation('return')}><span>↩</span><div>Gerar devolução<small>Selecionar pedido e continuar no Bling</small></div></button>
+            <button onClick={() => openOperation('pending')}><span>!</span><div>Pendências de sincronização<small>Vendas, caixa e webhooks que exigem atenção</small></div></button>
             <div className="menu-routing"><b>{cashSession ? `Caixa aberto · ${cashSession.accountName}` : 'Caixa fechado'}</b><small>Movimentos financeiros são enviados ao Bling. Nenhuma operação é simulada.</small></div>
           </div>}
         </div>
@@ -711,7 +721,7 @@ function App() {
     {operationModal && <div className="operation-overlay" role="dialog" aria-modal="true" aria-label="Operação de caixa">
       <section className="operation-dialog">
         <div className="operation-dialog-title">
-          <div><small>OPERAÇÕES DO CAIXA</small><h2>{operationModal === 'open' ? 'Abrir caixa' : operationModal === 'withdrawal' ? 'Sangria' : operationModal === 'supply' ? 'Suprimento' : operationModal === 'close' ? 'Fechar caixa' : 'Gerar devolução'}</h2></div>
+          <div><small>OPERAÇÕES DO CAIXA</small><h2>{operationModal === 'open' ? 'Abrir caixa' : operationModal === 'withdrawal' ? 'Sangria' : operationModal === 'supply' ? 'Suprimento' : operationModal === 'close' ? 'Fechar caixa' : operationModal === 'return' ? 'Gerar devolução' : 'Pendências de sincronização'}</h2></div>
           <button onClick={() => setOperationModal(undefined)} aria-label="Fechar">×</button>
         </div>
         {operationModal === 'open' && <div className="operation-form">
@@ -745,6 +755,23 @@ function App() {
             <div className="bling-history">{dayHistory.blingEntries.length ? dayHistory.blingEntries.map(entry => <div key={entry.id}><span>{entry.description}<small>{entry.accountName ?? cashSession?.accountName}</small></span><b className={entry.direction === 'D' ? 'debit' : 'credit'}>{entry.direction === 'D' ? '−' : '+'} {brl.format(entry.amount)}</b></div>) : <div className="empty-state compact">Sem lançamentos no Bling para esta conta hoje.</div>}</div>
             <label>Observação do fechamento<textarea value={operationNotes} onChange={event => setOperationNotes(event.target.value)} placeholder="Opcional" /></label>
             <div className="dialog-actions"><button className="secondary" onClick={() => setOperationModal(undefined)}>Cancelar</button><button className="finish" disabled={operationBusy || dayHistory.pendingSales > 0 || dayHistory.paymentTotals.some(item => countedValues[item.name] === undefined || countedValues[item.name].trim() === '')} onClick={() => void closeCash()}>{operationBusy ? 'Sincronizando…' : 'Confirmar fechamento'}</button></div>
+          </>}
+        </div>}
+        {operationModal === 'pending' && <div className="return-list pending-list">
+          {!pendingOperations ? <div className="empty-state">Consultando pendências…</div> : <>
+            <div className="closing-summary">
+              <div><small>Vendas</small><b>{pendingOperations.counts.sales}</b></div>
+              <div><small>Caixa</small><b>{pendingOperations.counts.cash}</b></div>
+              <div><small>Webhooks</small><b>{pendingOperations.counts.webhooks}</b></div>
+            </div>
+            {!pendingOperations.counts.sales && !pendingOperations.counts.cash && !pendingOperations.counts.webhooks
+              ? <div className="empty-state">Tudo sincronizado. Nenhuma pendência operacional.</div>
+              : <>
+                {pendingOperations.sales.map((item: any) => <div key={item.id}><span><b>Venda {item.blingOrderId || item.id.slice(0, 8)}</b><small>{item.status} · tentativa {item.attempts || 0}</small><small>{item.lastError || 'Aguardando processamento'}</small></span></div>)}
+                {pendingOperations.cash.map((item: any) => <div key={item.id}><span><b>{item.type === 'WITHDRAWAL' ? 'Sangria' : item.type === 'SUPPLY' ? 'Suprimento' : 'Abertura'} · {brl.format(item.amount)}</b><small>{item.status}</small><small>{item.lastError || 'Aguardando processamento'}</small></span></div>)}
+                {pendingOperations.webhooks.map((item: any) => <div key={item.eventId}><span><b>{item.event}</b><small>{item.status} · tentativa {item.attempts}</small><small>{item.lastError || 'Aguardando processamento'}</small></span></div>)}
+              </>
+            }
           </>}
         </div>}
         {operationModal === 'return' && <div className="return-list">

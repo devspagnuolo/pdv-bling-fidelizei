@@ -97,15 +97,27 @@ const reconcileFidelizeiSale = async (sale: Sale) => {
     await persist(sale);
     app.log.info({ saleId: sale.id }, 'Venda reconciliada com o Fidelizei');
   } catch (error) {
-    sale.lastError = error instanceof Error ? error.message.slice(0, 500) : 'Falha desconhecida no Fidelizei';
+    const attempts = Number((sale as Sale & { reconciliationAttempts?: number }).reconciliationAttempts ?? 0) + 1;
+    const dead = attempts >= 10;
+    const nextAttempt = new Date(Date.now() + Math.min(60 * 60_000, 30_000 * 2 ** Math.min(attempts, 7))).toISOString();
+    Object.assign(sale, {
+      lastError: error instanceof Error ? error.message.slice(0, 500) : 'Falha desconhecida no Fidelizei',
+      reconciliationAttempts: attempts,
+      nextReconciliationAt: nextAttempt,
+      reconciliationDead: dead
+    });
     await persist(sale);
-    app.log.warn({ error, saleId: sale.id }, 'Fidelizei indisponível; venda continuará pendente');
+    app.log.warn({ error, saleId: sale.id, attempts, dead }, 'Fidelizei indisponível; venda continuará pendente');
   }
 };
 const reconcilePendingSales = async () => {
   if (!pool) return;
   const result = await pool.query(
-    `select data from pdv_sales where status = 'RECONCILIATION_REQUIRED' order by updated_at asc limit 50`
+    `select data from pdv_sales
+     where status = 'RECONCILIATION_REQUIRED'
+       and coalesce((data->>'reconciliationDead')::boolean, false) = false
+       and coalesce((data->>'nextReconciliationAt')::timestamptz, now()) <= now()
+     order by updated_at asc limit 50`
   ) as { rows: { data: Sale }[] };
   for (const row of result.rows) await reconcileFidelizeiSale(row.data);
 };
@@ -397,6 +409,36 @@ app.post('/cash/sessions/:id/close', async (req) => {
     [id, JSON.stringify(summary)]
   );
   return { closed: true, sessionId: id, summary };
+});
+
+app.get('/operations/pending', async () => {
+  const database = requireDatabase();
+  const [salesResult, cashResult, webhookResult] = await Promise.all([
+    database.query(
+      `select id, status, data->>'blingOrderId' as "blingOrderId", data->>'lastError' as "lastError",
+        coalesce((data->>'reconciliationAttempts')::int,0) as attempts, updated_at as "updatedAt"
+       from pdv_sales where status in ('PROCESSING','SYNC_FAILED','RECONCILIATION_REQUIRED')
+       order by updated_at asc limit 100`
+    ) as Promise<{ rows: any[] }>,
+    database.query(
+      `select id, operation_type as type, amount::float8 as amount, data->>'syncStatus' as status,
+        data->>'lastError' as "lastError", created_at as "createdAt"
+       from pdv_cash_operations where data->>'syncStatus' in ('PENDING','FAILED')
+       order by created_at asc limit 100`
+    ) as Promise<{ rows: any[] }>,
+    database.query(
+      `select event_id as "eventId", event_name as event, status, attempts, last_error as "lastError",
+        received_at as "receivedAt" from bling_webhook_events
+       where status in ('PENDING','PROCESSING','FAILED','DEAD')
+       order by received_at asc limit 100`
+    ) as Promise<{ rows: any[] }>
+  ]);
+  return {
+    counts: { sales: salesResult.rows.length, cash: cashResult.rows.length, webhooks: webhookResult.rows.length },
+    sales: salesResult.rows,
+    cash: cashResult.rows,
+    webhooks: webhookResult.rows
+  };
 });
 
 app.get('/customers/:cpf', async (req) => lookupCustomer((req.params as { cpf: string }).cpf));
