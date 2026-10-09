@@ -664,7 +664,16 @@ app.post('/sales/:id/complete', async (req) => {
   const id = (req.params as { id: string }).id;
   const original = await getSale(id);
   const body = req.body as { paymentMethodId?: string; payments?: PaymentSplit[] };
-  if (!original || original.status !== 'OPEN') return conflict('Venda já está sendo processada ou foi concluída');
+  if (!original) return conflict('Venda não encontrada');
+  if (original.status === 'SYNC_FAILED') {
+    if (/Bling não criou o pedido \(HTTP 4\d\d\)/.test(original.lastError ?? '')) {
+      original.status = 'OPEN';
+      await persist(original);
+    } else {
+      return conflict(`Venda pendente para conferência: ${original.lastError ?? 'resultado do Bling não confirmado'}`);
+    }
+  }
+  if (original.status !== 'OPEN') return conflict('Venda já está sendo processada ou foi concluída');
   const session = await cashSessionById(original.cashSessionId);
   if (!session || session.status !== 'OPEN') return badRequest('O caixa desta venda não está mais aberto');
 
@@ -764,8 +773,8 @@ app.post('/sales/:id/complete', async (req) => {
     sale.status = 'SYNC_FAILED';
     sale.lastError = error instanceof Error ? error.message.slice(0, 500) : 'Falha desconhecida na sincronização';
     await persist(sale);
-    app.log.error({ error, saleId: sale.id }, 'Venda pendente: resultado da criação no Bling precisa de conferência');
-    throw Object.assign(new Error('Não foi possível confirmar o pedido no Bling. A venda ficou pendente para conferência, sem nova tentativa automática.'), { statusCode: 502 });
+    app.log.error({ err: error, saleId: sale.id }, 'Venda pendente: resultado da criação no Bling precisa de conferência');
+    throw Object.assign(new Error(`Não foi possível confirmar o pedido no Bling. Motivo: ${sale.lastError}`), { statusCode: 502 });
   } finally {
     processingSales.delete(id);
   }
