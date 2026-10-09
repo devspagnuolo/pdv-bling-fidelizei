@@ -339,9 +339,10 @@ app.post('/cash/sessions/open', async (req) => {
   const channels = await bling.salesChannels();
   const channel = channels.find(item => item.id === body.channelId);
   if (!channel) return badRequest('Loja/canal de venda não encontrado ou inativo no Bling');
+  const useDefaultRouting = channel.id === 'DEFAULT';
   const businessUnitId = body.businessUnitId ?? channel.businessUnitId;
-  if (!businessUnitId) return badRequest('A loja selecionada não possui unidade de negócio vinculada no Bling');
-  const businessUnitName = channel.businessUnitName ?? 'Unidade do Bling';
+  if (!useDefaultRouting && !businessUnitId) return badRequest('A loja selecionada não possui unidade de negócio vinculada no Bling');
+  const businessUnitName = useDefaultRouting ? 'Configuração padrão' : channel.businessUnitName ?? 'Unidade do Bling';
   const openingAmount = money(Math.max(0, Number(body.openingAmount) || 0));
   const sessionId = randomUUID();
   const operationId = randomUUID();
@@ -715,8 +716,8 @@ app.post('/sales/:id/complete', async (req) => {
       discount: sale.discount,
       freight: sale.freight ?? 0,
       observations: sale.observations,
-      salesChannelId: session.channelId,
-      businessUnitId: session.businessUnitId,
+      salesChannelId: session.channelId === 'DEFAULT' ? undefined : session.channelId,
+      businessUnitId: session.channelId === 'DEFAULT' ? undefined : session.businessUnitId,
       payments,
       idempotencyKey: sale.id
     });
