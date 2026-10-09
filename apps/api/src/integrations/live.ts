@@ -223,8 +223,10 @@ const createOrder = async (input: { customerId?: string; sellerId: string; sales
   const response = await blingRequest('/pedidos/vendas', { method: 'POST', body: JSON.stringify(payload), headers: { 'Idempotency-Key': input.idempotencyKey } });
   const body = await response.json() as { data?: { id?: string | number }; error?: unknown; message?: string; retorno?: unknown };
   if (!response.ok || !body.data?.id) {
-    const detail = body.message ?? (typeof body.error === 'string' ? body.error : body.retorno ? JSON.stringify(body.retorno) : '');
-    throw new Error(`Bling não criou o pedido (HTTP ${response.status})${detail ? `: ${detail.slice(0, 260)}` : ''}`);
+    const detail = body.message ??
+      (body.error ? (typeof body.error === 'string' ? body.error : JSON.stringify(body.error)) :
+        body.retorno ? JSON.stringify(body.retorno) : JSON.stringify(body));
+    throw new Error(`Bling não criou o pedido (HTTP ${response.status})${detail ? `: ${detail.slice(0, 900)}` : ''}`);
   }
   const id = String(body.data.id);
   let number: string | undefined;
