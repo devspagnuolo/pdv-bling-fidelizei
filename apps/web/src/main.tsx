@@ -436,6 +436,7 @@ function App() {
   const complete = async () => {
     if (completing) return;
     if (!cashSession) return setMessage('Abra o caixa antes de finalizar a venda.');
+    const fiscalPrintWindow = emitFiscal ? window.open('about:blank', '_blank') : null;
     setCompleting(true);
     try {
       const activeSale = sale ?? await create();
@@ -454,7 +455,9 @@ function App() {
       const data = await r.json();
       if (!r.ok) return setMessage(data.message ?? 'Não foi possível concluir a venda.');
       setSale(data);
-      if (!emitFiscal || data.fiscalDocumentUrl) setReceipt(data);
+      if (!emitFiscal) setReceipt(data);
+      if (emitFiscal && data.fiscalDocumentUrl && fiscalPrintWindow) fiscalPrintWindow.location.replace(data.fiscalDocumentUrl);
+      else if (emitFiscal) fiscalPrintWindow?.close();
       setMessage(data.status === 'COMPLETED'
         ? `Venda concluída. Pedido Bling nº ${data.blingOrderNumber ?? data.blingOrderId}${data.fiscalStatus === 'REQUESTED' ? data.fiscalDocumentUrl ? ' · Documento fiscal aberto para impressão.' : ' · NFC-e solicitada; aguarde a autorização no Bling para imprimir o documento fiscal.' : data.fiscalStatus === 'FAILED' ? ' · Pedido salvo, mas a NFC-e precisa ser verificada no Bling.' : ' · Impressão do comprovante não fiscal aberta.'}`
         : 'Pedido criado; a fidelidade exige reconciliação automática.');
