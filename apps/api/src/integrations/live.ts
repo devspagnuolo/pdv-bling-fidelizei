@@ -199,6 +199,7 @@ const createOrder = async (input: { customerId?: string; sellerId: string; sales
   const itemNotes = input.items.filter(item => item.comment?.trim()).map(item => `${item.sku}: ${item.comment?.trim()}`).join(' | ');
   const orderNotes = [input.observations?.trim(), itemNotes ? `Itens: ${itemNotes}` : undefined].filter(Boolean).join('\n');
   const payload = {
+    data: saoPauloDate(),
     numeroLoja: input.idempotencyKey,
     contato: { id: Number(customerId) },
     vendedor: { id: Number(input.sellerId) },
