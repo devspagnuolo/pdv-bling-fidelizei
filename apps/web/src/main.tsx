@@ -576,7 +576,7 @@ function App() {
     }
   };
   const openCash = async () => {
-    if (!operatorId || !selectedAccount || !selectedChannel || !selectedBusinessUnit) return setMessage('Selecione operador, loja, unidade e conta financeira do Bling.');
+    if (!operatorId || !selectedAccount || !selectedChannel || (selectedChannel !== 'DEFAULT' && !selectedBusinessUnit)) return setMessage('Selecione operador, loja, unidade e conta financeira do Bling.');
     setOperationBusy(true);
     try {
       const response = await apiFetch(`${api}/cash/sessions/open`, {
@@ -858,10 +858,10 @@ function App() {
             setSelectedChannel(id);
             setSelectedBusinessUnit(channel?.businessUnitId ?? '');
           }}><option value="">Selecione</option>{salesChannels.map(channel => <option value={channel.id} key={channel.id}>{channel.name}</option>)}</select></label>
-          <label>Unidade de negócio<select value={selectedBusinessUnit} onChange={event => setSelectedBusinessUnit(event.target.value)} disabled={!selectedChannel}><option value="">Selecione</option>{salesChannels.filter(channel => channel.id === selectedChannel && channel.businessUnitId).map(channel => <option value={channel.businessUnitId} key={channel.businessUnitId}>{channel.businessUnitName ?? 'Unidade do Bling'}</option>)}</select></label>
+          <label>Unidade de negócio<select value={selectedChannel === 'DEFAULT' ? 'DEFAULT' : selectedBusinessUnit} onChange={event => setSelectedBusinessUnit(event.target.value)} disabled={!selectedChannel || selectedChannel === 'DEFAULT'}><option value="">{selectedChannel === 'DEFAULT' ? 'Configuração padrão do Bling' : 'Selecione'}</option>{selectedChannel === 'DEFAULT' && <option value="DEFAULT">Configuração padrão do Bling</option>}{salesChannels.filter(channel => channel.id === selectedChannel && channel.businessUnitId).map(channel => <option value={channel.businessUnitId} key={channel.businessUnitId}>{channel.businessUnitName ?? 'Unidade do Bling'}</option>)}</select></label>
           <label>Troco / saldo inicial<input value={operationAmount} inputMode="decimal" placeholder="0,00" onChange={event => setOperationAmount(event.target.value)} /></label>
           <details className="opening-routing"><summary>Conta financeira usada nos lançamentos</summary><label>Conta financeira do Bling<select value={selectedAccount} onChange={event => setSelectedAccount(event.target.value)}><option value="">Selecione</option>{cashAccounts.map(account => <option value={account.id} key={account.id}>{account.name} · {account.type}</option>)}</select></label></details>
-          <button className="finish" disabled={operationBusy || !selectedAccount || !selectedChannel || !selectedBusinessUnit} onClick={() => void openCash()}>{operationBusy ? 'Abrindo…' : 'Abrir caixa'}</button>
+          <button className="finish" disabled={operationBusy || !selectedAccount || !selectedChannel || (selectedChannel !== 'DEFAULT' && !selectedBusinessUnit)} onClick={() => void openCash()}>{operationBusy ? 'Abrindo…' : 'Abrir caixa'}</button>
         </div>}
         {(operationModal === 'withdrawal' || operationModal === 'supply') && <div className="operation-form">
           <div className="operation-account"><span>Conta financeira</span><b>{cashSession?.accountName}</b></div>
