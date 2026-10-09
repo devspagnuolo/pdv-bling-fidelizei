@@ -251,14 +251,22 @@ function App() {
       && (!isCashMethod(payment.paymentMethodId) || numberValue(payment.receivedAmount) >= numberValue(payment.amount)));
 
   useEffect(() => {
-    setPayments(current => current.length === 1 && !current[0].touched
-      ? [{ ...current[0], amount: total > 0 ? total.toFixed(2) : '0' }]
-      : current);
+    setPayments(current => {
+      if (!current.length) return current;
+      const distributed = roundMoney(current.reduce((sum, payment) => sum + numberValue(payment.amount), 0));
+      const difference = roundMoney(total - distributed);
+      if (Math.abs(difference) < .01) return current;
+      const lastIndex = current.length - 1;
+      const adjusted = roundMoney(numberValue(current[lastIndex].amount) + difference);
+      if (adjusted < 0) return current;
+      return current.map((payment, index) => index === lastIndex
+        ? { ...payment, amount: adjusted.toFixed(2) }
+        : payment);
+    });
   }, [total]);
 
   const updatePayment = (key: string, patch: Partial<PaymentEntry>) => {
     setPayments(current => current.map(payment => payment.key === key ? { ...payment, ...patch, touched: true } : payment));
-    setSale(undefined);
   };
   const addPayment = () => {
     const defaultId = paymentMethods.find(method => method.isDefault)?.id ?? paymentMethods[0]?.id ?? '';
@@ -269,17 +277,14 @@ function App() {
       receivedAmount: '',
       touched: true
     }]);
-    setSale(undefined);
   };
   const removePayment = (key: string) => {
     setPayments(current => current.filter(payment => payment.key !== key));
-    setSale(undefined);
   };
   const fillPaymentBalance = (key: string) => {
     setPayments(current => current.map(payment => payment.key === key
       ? { ...payment, amount: roundMoney(numberValue(payment.amount) + remainingPayment).toFixed(2), touched: true }
       : payment));
-    setSale(undefined);
   };
 
   const changeCart = (next: Item[]) => {
