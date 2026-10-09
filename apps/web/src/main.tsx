@@ -52,7 +52,7 @@ type CashDay = {
   pendingSales: number;
   canClose?: boolean;
 };
-type OperationModal = 'open' | 'withdrawal' | 'supply' | 'close' | 'return' | 'pending';
+type OperationModal = 'open' | 'withdrawal' | 'supply' | 'close' | 'control' | 'return' | 'pending';
 type Step = 'product' | 'customer' | 'payment';
 type AuthPrincipal = { operatorId: string; operatorName: string; role: 'OPERATOR' | 'MANAGER' };
 const storedPrincipal = (): Partial<AuthPrincipal> => {
@@ -112,7 +112,9 @@ function App() {
   const [completing, setCompleting] = useState(false);
   const [recentSales, setRecentSales] = useState<any[]>([]);
   const [pendingOperations, setPendingOperations] = useState<any>();
+  const [cashControl, setCashControl] = useState<any>();
   const [receipt, setReceipt] = useState<any>();
+  const autoOutputId = useRef('');
   const [discountMode, setDiscountMode] = useState<'value' | 'percent'>('value');
   const [discountInput, setDiscountInput] = useState('0');
   const [freightInput, setFreightInput] = useState('0');
@@ -141,6 +143,19 @@ function App() {
   useEffect(() => {
     apiFetch(`${api}/auth/status`).then(response => response.json()).then(data => setAuthEnabled(data.enabled === true)).catch(() => setAuthEnabled(false));
   }, []);
+
+  useEffect(() => {
+    if (!receipt?.id || autoOutputId.current === receipt.id) return;
+    autoOutputId.current = receipt.id;
+    const timer = window.setTimeout(() => {
+      if (receipt.emitFiscal && receipt.fiscalDocumentUrl) {
+        window.open(receipt.fiscalDocumentUrl, '_blank', 'noopener,noreferrer');
+      } else if (!receipt.emitFiscal) {
+        window.print();
+      }
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [receipt]);
 
   useEffect(() => {
     const onShortcut = (event: KeyboardEvent) => {
@@ -429,9 +444,9 @@ function App() {
       const data = await r.json();
       if (!r.ok) return setMessage(data.message ?? 'Não foi possível concluir a venda.');
       setSale(data);
-      if (!emitFiscal) setReceipt(data);
+      if (!emitFiscal || data.fiscalDocumentUrl) setReceipt(data);
       setMessage(data.status === 'COMPLETED'
-        ? `Venda concluída. Pedido Bling: ${data.blingOrderId}${data.fiscalStatus === 'REQUESTED' ? ' · NFC-e solicitada ao Bling.' : data.fiscalStatus === 'FAILED' ? ' · Pedido salvo, mas a NFC-e precisa ser verificada no Bling.' : ' · Comprovante não fiscal disponível para impressão.'}`
+        ? `Venda concluída. Pedido Bling nº ${data.blingOrderNumber ?? data.blingOrderId}${data.fiscalStatus === 'REQUESTED' ? data.fiscalDocumentUrl ? ' · Documento fiscal aberto para impressão.' : ' · NFC-e solicitada; aguarde a autorização no Bling para imprimir o documento fiscal.' : data.fiscalStatus === 'FAILED' ? ' · Pedido salvo, mas a NFC-e precisa ser verificada no Bling.' : ' · Impressão do comprovante não fiscal aberta.'}`
         : 'Pedido criado; a fidelidade exige reconciliação automática.');
     } finally {
       setCompleting(false);
@@ -525,6 +540,19 @@ function App() {
     if (type === 'return') {
       apiFetch(`${api}/sales/recent?limit=15`).then(response => response.json()).then(setRecentSales).catch(() => setRecentSales([]));
     }
+    if (type === 'control') {
+      setCashControl(undefined);
+      if (!cashSession) {
+        setMessage('Abra o caixa para consultar o controle.');
+        setOperationModal(undefined);
+      } else {
+        apiFetch(`${api}/cash/control?sessionId=${encodeURIComponent(cashSession.id)}`).then(async response => {
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.message ?? 'Não foi possível consultar o controle do caixa.');
+          return data;
+        }).then(setCashControl).catch(error => setMessage(error instanceof Error ? error.message : 'Falha ao consultar o controle do caixa.'));
+      }
+    }
     if (type === 'pending') {
       setPendingOperations(undefined);
       apiFetch(`${api}/operations/pending`).then(async response => {
@@ -603,6 +631,7 @@ function App() {
             <button disabled={!cashSession || (authEnabled && authRole !== 'MANAGER')} onClick={() => openOperation('withdrawal')}><span>↘</span><div>Sangria<small>Registra débito em Caixas e Bancos</small></div></button>
             <button disabled={!cashSession || (authEnabled && authRole !== 'MANAGER')} onClick={() => openOperation('supply')}><span>↗</span><div>Suprimento<small>Registra crédito em Caixas e Bancos</small></div></button>
             <button disabled={!cashSession || (authEnabled && authRole !== 'MANAGER')} onClick={() => openOperation('close')}><span>□</span><div>Fechar caixa<small>Conferir o movimento do dia</small></div></button>
+            <button disabled={!cashSession} onClick={() => openOperation('control')}><span>▥</span><div>Controle de caixa<small>Vendas, pagamentos e movimentações</small></div></button>
             <button onClick={() => printReceipt()} disabled={!sale?.blingOrderId}><span>▣</span><div>Imprimir<small>Comprovante da venda atual</small></div></button>
             <button onClick={() => void reprintLast()}><span>▤</span><div>Reimprimir última operação<small>Busca a última venda concluída</small></div></button>
             <button onClick={() => openOperation('return')}><span>↩</span><div>Gerar devolução<small>Selecionar pedido e continuar no Bling</small></div></button>
@@ -805,7 +834,7 @@ function App() {
     {operationModal && <div className="operation-overlay" role="dialog" aria-modal="true" aria-label="Operação de caixa">
       <section className="operation-dialog">
         <div className="operation-dialog-title">
-          <div><small>OPERAÇÕES DO CAIXA</small><h2>{operationModal === 'open' ? 'Abrir caixa' : operationModal === 'withdrawal' ? 'Sangria' : operationModal === 'supply' ? 'Suprimento' : operationModal === 'close' ? 'Fechar caixa' : operationModal === 'return' ? 'Gerar devolução' : 'Pendências de sincronização'}</h2></div>
+          <div><small>OPERAÇÕES DO CAIXA</small><h2>{operationModal === 'open' ? 'Abrir caixa' : operationModal === 'withdrawal' ? 'Sangria' : operationModal === 'supply' ? 'Suprimento' : operationModal === 'close' ? 'Fechar caixa' : operationModal === 'control' ? 'Controle de caixa' : operationModal === 'return' ? 'Gerar devolução' : 'Pendências de sincronização'}</h2></div>
           <button onClick={() => setOperationModal(undefined)} aria-label="Fechar">×</button>
         </div>
         {operationModal === 'open' && <div className="operation-form">
@@ -819,6 +848,24 @@ function App() {
           <label>Valor<input value={operationAmount} inputMode="decimal" autoFocus placeholder="0,00" onChange={event => setOperationAmount(event.target.value)} /></label>
           <label>Motivo / observação<textarea value={operationNotes} onChange={event => setOperationNotes(event.target.value)} placeholder={operationModal === 'withdrawal' ? 'Ex.: retirada para depósito bancário' : 'Ex.: reforço de troco'} /></label>
           <button className="finish" disabled={operationBusy || numberValue(operationAmount) <= 0} onClick={() => void registerCashOperation(operationModal === 'withdrawal' ? 'WITHDRAWAL' : 'SUPPLY')}>{operationBusy ? 'Registrando no Bling…' : `Registrar ${operationModal === 'withdrawal' ? 'sangria' : 'suprimento'} no Bling`}</button>
+        </div>}
+        {operationModal === 'control' && <div className="closing-review cash-control">
+          {!cashControl ? <div className="empty-state">Carregando o controle do caixa…</div> : <>
+            <div className="operation-account"><span>Conta financeira</span><b>{cashControl.session.accountName}</b></div>
+            <div className="closing-summary">
+              <div><small>Saldo inicial</small><b>{brl.format(cashControl.session.openingAmount)}</b></div>
+              <div><small>Vendas</small><b>{cashControl.salesCount}</b></div>
+              <div><small>Total vendido</small><b>{brl.format(cashControl.salesTotal)}</b></div>
+              <div><small>Dinheiro esperado</small><b>{brl.format(cashControl.expectedCash)}</b></div>
+            </div>
+            {cashControl.pendingSales > 0 && <p className="inline-warning">{cashControl.pendingSales} venda(s) aguardando sincronização.</p>}
+            <h3>Recebimentos por forma de pagamento</h3>
+            <div className="bling-history">{cashControl.paymentTotals.length ? cashControl.paymentTotals.map((item: any) => <div key={item.name}><span>{item.name}</span><b>{brl.format(item.amount)}</b></div>) : <div className="empty-state compact">Nenhuma venda registrada.</div>}</div>
+            <h3>Vendas desta abertura</h3>
+            <div className="bling-history">{cashControl.sales.length ? cashControl.sales.map((item: any) => <div key={item.id}><span>Pedido {item.orderNumber ?? item.orderId ?? item.id.slice(0, 8)}<small>{new Date(item.createdAt).toLocaleString('pt-BR')}</small></span><b>{brl.format(item.total)}</b></div>) : <div className="empty-state compact">Nenhuma venda registrada.</div>}</div>
+            <h3>Movimentações do caixa</h3>
+            <div className="bling-history">{cashControl.operations.length ? cashControl.operations.map((item: any) => <div key={item.id}><span>{item.type === 'OPENING' ? 'Abertura' : item.type === 'WITHDRAWAL' ? 'Sangria' : item.type === 'SUPPLY' ? 'Suprimento' : item.type === 'CLOSING' ? 'Fechamento' : item.type}<small>{new Date(item.createdAt).toLocaleString('pt-BR')}</small></span><b className={item.type === 'WITHDRAWAL' ? 'debit' : 'credit'}>{item.type === 'WITHDRAWAL' ? '−' : '+'} {brl.format(item.amount)}</b></div>) : <div className="empty-state compact">Sem movimentações.</div>}</div>
+          </>}
         </div>}
         {operationModal === 'close' && <div className="closing-review">
           {operationBusy && !dayHistory ? <div className="empty-state">Consultando o movimento no Bling…</div> : dayHistory && <>
@@ -860,7 +907,7 @@ function App() {
         </div>}
         {operationModal === 'return' && <div className="return-list">
           <p>Escolha a venda. A devolução será concluída no pedido correspondente do Bling, preservando estoque, financeiro e documento fiscal.</p>
-          {recentSales.length ? recentSales.map(item => <div key={item.id}><span><b>Pedido {item.blingOrderId}</b><small>{new Date(item.createdAt).toLocaleString('pt-BR')} · {brl.format(item.total)}</small></span><button onClick={() => window.open('https://www.bling.com.br/pedidos-venda', '_blank', 'noopener,noreferrer')}>Abrir no Bling</button></div>) : <div className="empty-state compact">Nenhuma venda concluída encontrada.</div>}
+          {recentSales.length ? recentSales.map(item => <div key={item.id}><span><b>Pedido {item.blingOrderNumber ?? item.blingOrderId}</b><small>{new Date(item.createdAt).toLocaleString('pt-BR')} · {brl.format(item.total)}</small></span><button onClick={() => window.open('https://www.bling.com.br/pedidos-venda', '_blank', 'noopener,noreferrer')}>Abrir no Bling</button></div>) : <div className="empty-state compact">Nenhuma venda concluída encontrada.</div>}
           <p className="integration-explanation">O PDV não cria uma devolução simulada: o fluxo oficial do Bling é aberto para manter as regras fiscais e financeiras da venda.</p>
         </div>}
       </section>
@@ -869,7 +916,7 @@ function App() {
     {receipt && <div className="receipt-overlay" role="dialog" aria-modal="true" aria-label="Comprovante não fiscal">
       <section className="receipt-sheet">
         <div className="receipt-brand"><img src="/vivi-logo-original.png" alt="Vivi Moda Plus Size" /><b>COMPROVANTE NÃO FISCAL</b><small>Sem valor fiscal</small></div>
-        <div className="receipt-meta"><span>Pedido Bling <b>{receipt.blingOrderId ?? 'Pendente'}</b></span><span>{new Date(receipt.createdAt).toLocaleString('pt-BR')}</span></div>
+        <div className="receipt-meta"><span>Pedido Bling <b>{receipt.blingOrderNumber ?? receipt.blingOrderId ?? 'Pendente'}</b></span><span>{new Date(receipt.createdAt).toLocaleString('pt-BR')}</span></div>
         <div className="receipt-items">{receipt.items?.map((item: any) => <div key={item.productId}><span>{item.quantity} × {item.name}</span><b>{brl.format(item.quantity * item.unitPrice)}</b></div>)}</div>
         <div className="receipt-totals">
           <span>Subtotal <b>{brl.format(receipt.subtotal ?? 0)}</b></span>
