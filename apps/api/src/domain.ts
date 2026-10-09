@@ -59,6 +59,8 @@ export type Sale = {
   emitFiscal?: boolean;
   total: number;
   blingOrderId?: string;
+  blingOrderNumber?: string;
+  fiscalDocumentUrl?: string;
   fiscalStatus?: 'NOT_REQUESTED' | 'REQUESTED' | 'FAILED';
   fidelizeiTransactionId?: string;
   lastError?: string;
