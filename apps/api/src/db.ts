@@ -69,5 +69,21 @@ export const initializeDatabase = async () => {
     created_at timestamptz not null default now()
   )`);
   await pool.query('create index if not exists pdv_cash_operations_session_idx on pdv_cash_operations (session_id, created_at)');
+  await pool.query(`create table if not exists bling_webhook_events (
+    event_id text primary key,
+    event_name text not null,
+    company_id text not null,
+    event_date timestamptz,
+    payload jsonb not null,
+    status text not null check (status in ('PENDING','PROCESSING','PROCESSED','FAILED','DEAD')),
+    attempts integer not null default 0,
+    next_attempt_at timestamptz not null default now(),
+    last_error text,
+    received_at timestamptz not null default now(),
+    processed_at timestamptz
+  )`);
+  await pool.query(`create index if not exists bling_webhook_events_pending_idx
+    on bling_webhook_events (status, next_attempt_at, received_at)
+    where status in ('PENDING','PROCESSING','FAILED','DEAD')`);
   await pool.query('delete from oauth_states where expires_at < now()');
 };

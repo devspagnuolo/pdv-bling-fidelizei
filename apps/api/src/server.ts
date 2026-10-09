@@ -10,8 +10,18 @@ import {
 } from './integrations/credentials.js';
 import { initializeDatabase, pool } from './db.js';
 import { money, type Customer, type PaymentSplit, type Sale, type SaleItem } from './domain.js';
+import { getWebhookHealth, registerBlingWebhooks } from './webhooks.js';
 
 const app = Fastify({ logger: true });
+app.removeContentTypeParser('application/json');
+app.addContentTypeParser('application/json', { parseAs: 'buffer' }, (req, body, done) => {
+  try {
+    (req as typeof req & { rawBody?: Buffer }).rawBody = body as Buffer;
+    done(null, JSON.parse((body as Buffer).toString('utf8')));
+  } catch (error) {
+    done(error as Error, undefined);
+  }
+});
 const allowedOrigins = new Set([
   process.env.PDV_WEB_URL,
   'http://localhost:5173',
@@ -53,6 +63,7 @@ const lookupCustomer = async (cpf: string): Promise<Customer> => {
 };
 
 await initializeDatabase();
+registerBlingWebhooks(app);
 void bling.syncProducts().catch(error => app.log.error(error, 'Falha na sincronização inicial do catálogo Bling'));
 setInterval(() => void bling.syncProducts().catch(error => app.log.error(error, 'Falha na sincronização periódica do catálogo Bling')), 15 * 60_000).unref();
 const persist = async (sale: Sale) => {
@@ -126,7 +137,9 @@ app.get('/health', async (_req, reply) => {
     database,
     bling: blingStatus,
     pendingSales,
-    encryptionKeyConfigured: Boolean(process.env.CREDENTIALS_ENCRYPTION_KEY)
+    encryptionKeyConfigured: Boolean(process.env.CREDENTIALS_ENCRYPTION_KEY),
+    webhook: await getWebhookHealth(),
+    webhookCompanyConfigured: Boolean(process.env.BLING_COMPANY_ID)
   };
 });
 let integrationStatusCache: { expires: number; value: unknown } | undefined;
