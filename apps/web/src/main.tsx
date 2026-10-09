@@ -63,6 +63,15 @@ const newPaymentKey = () => globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-
 const numberValue = (value: string) => Math.max(0, Number(value.replace(',', '.')) || 0);
 const roundMoney = (value: number) => Math.round(value * 100) / 100;
 const brl = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' });
+const storeReceipt = {
+  legalName: import.meta.env.VITE_STORE_LEGAL_NAME || 'VIVI MODA PLUS SIZE COMÉRCIO VAREJISTA E ACESSÓRIOS LTDA - ME',
+  cnpj: import.meta.env.VITE_STORE_CNPJ || '35.405.822/0001-37',
+  stateRegistration: import.meta.env.VITE_STORE_STATE_REGISTRATION || '121.138.953.114',
+  phone: import.meta.env.VITE_STORE_PHONE || '(11) 98600-7779',
+  address: import.meta.env.VITE_STORE_ADDRESS || 'Avenida Sapopemba, 700, Loja 10',
+  district: import.meta.env.VITE_STORE_DISTRICT || 'Jardim Utinga',
+  cityStateZip: import.meta.env.VITE_STORE_CITY_STATE_ZIP || 'Santo André - SP · CEP 09250-301'
+};
 
 const paymentIcon = (method: PaymentMethod) => {
   const value = `${method.type} ${method.name}`.toLowerCase();
@@ -941,20 +950,40 @@ function App() {
 
     {receipt && <div className="receipt-overlay" role="dialog" aria-modal="true" aria-label="Comprovante não fiscal">
       <section className="receipt-sheet">
-        <div className="receipt-brand"><img src="/vivi-logo-original.png" alt="Vivi Moda Plus Size" /><b>COMPROVANTE NÃO FISCAL</b><small>Sem valor fiscal</small></div>
-        <div className="receipt-meta"><span>Pedido Bling <b>{receipt.blingOrderNumber ?? receipt.blingOrderId ?? 'Pendente'}</b></span><span>{new Date(receipt.createdAt).toLocaleString('pt-BR')}</span></div>
-        <div className="receipt-items">{receipt.items?.map((item: any) => <div key={item.productId}><span>{item.quantity} × {item.name}</span><b>{brl.format(item.quantity * item.unitPrice)}</b></div>)}</div>
+        <div className="receipt-brand">
+          <img src="/vivi-logo-original.png" alt="Vivi Moda Plus Size" />
+          <b>{storeReceipt.legalName}</b>
+          <small>CNPJ {storeReceipt.cnpj} · IE {storeReceipt.stateRegistration}</small>
+          <small>Tel. {storeReceipt.phone}</small>
+          <small>{storeReceipt.address}</small>
+          <small>{storeReceipt.district} · {storeReceipt.cityStateZip}</small>
+        </div>
+        <div className="receipt-document-title"><b>COMPROVANTE NÃO FISCAL</b><small>Documento sem valor fiscal</small></div>
+        <div className="receipt-meta">
+          <span>Pedido Bling <b>{receipt.blingOrderNumber ?? receipt.blingOrderId ?? 'Pendente'}</b></span>
+          <span>Data <b>{new Date(receipt.createdAt).toLocaleString('pt-BR')}</b></span>
+          <span>Cliente <b>{receipt.customer?.name ?? 'Consumidor Final'}</b></span>
+          {receipt.customer?.cpf && <span>CPF <b>{receipt.customer.cpf}</b></span>}
+          <span>Vendedor <b>{sellers.find(item => item.id === receipt.sellerId)?.name ?? receipt.sellerId}</b></span>
+        </div>
+        <div className="receipt-table-head"><span>Item</span><span>Qtd.</span><span>Unit.</span><span>Total</span></div>
+        <div className="receipt-items">{receipt.items?.map((item: any) => <div key={item.productId}>
+          <span><b>{item.name}</b><small>{item.sku}{item.comment ? ` · ${item.comment}` : ''}</small></span>
+          <span>{item.quantity}</span>
+          <span>{brl.format(item.unitPrice)}</span>
+          <b>{brl.format(item.quantity * item.unitPrice)}</b>
+        </div>)}</div>
         <div className="receipt-totals">
           <span>Subtotal <b>{brl.format(receipt.subtotal ?? 0)}</b></span>
-          {(receipt.discount ?? 0) > 0 && <span>Desconto <b>− {brl.format(receipt.discount)}</b></span>}
+          {(receipt.discount ?? 0) > 0 && <span>Desconto{receipt.coupon?.code ? ` · Cupom ${receipt.coupon.code}` : ''} <b>− {brl.format(receipt.discount)}</b></span>}
           {(receipt.freight ?? 0) > 0 && <span>Frete / adicional <b>+ {brl.format(receipt.freight)}</b></span>}
           <strong>Total <b>{brl.format(receipt.total ?? 0)}</b></strong>
         </div>
-        <div className="receipt-payments"><b>Pagamentos</b>{receipt.payments?.map((payment: any, index: number) => <span key={index}>{payment.paymentMethodName}<strong>{brl.format(payment.amount)}</strong></span>)}</div>
-        {(receipt.change ?? 0) > 0 && <div className="receipt-change"><span>Troco</span><b>{brl.format(receipt.change)}</b></div>}
-        <p>Cliente: {receipt.customer?.name ?? 'Consumidor Final'}</p>
-        <p>Vendedor: {sellers.find(item => item.id === receipt.sellerId)?.name ?? receipt.sellerId}</p>
-        <p className="receipt-thanks">Obrigada pela preferência!</p>
+        <div className="receipt-payments"><b>Pagamentos</b>{receipt.payments?.map((payment: any, index: number) => <span key={index}><span>{new Date(receipt.createdAt).toLocaleDateString('pt-BR')} · {payment.paymentMethodName}</span><strong>{brl.format(payment.amount)}</strong></span>)}</div>
+        {(receipt.amountReceived ?? 0) > 0 && <div className="receipt-cash-detail"><span>Valor recebido <b>{brl.format(receipt.amountReceived)}</b></span>{(receipt.change ?? 0) > 0 && <span>Troco <b>{brl.format(receipt.change)}</b></span>}</div>}
+        {receipt.observations && <p className="receipt-observations"><b>Observações:</b> {receipt.observations}</p>}
+        <p className="receipt-exchange">Para trocas ou devoluções, apresente este comprovante.</p>
+        <p className="receipt-thanks">Ficamos felizes em atendê-la.<br />Volte sempre!</p>
         <div className="receipt-actions no-print"><button className="secondary" onClick={() => setReceipt(undefined)}>Fechar</button><button className="finish" onClick={() => window.print()}>Imprimir comprovante</button></div>
       </section>
     </div>}
