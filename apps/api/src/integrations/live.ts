@@ -193,7 +193,7 @@ const findFinalConsumerId = async () => {
   finalConsumerCache = { expires: Date.now() + 10 * 60_000, id };
   return id;
 };
-const createOrder = async (input: { customerId?: string; sellerId: string; salesChannelId?: string; businessUnitId?: string; items: SaleItem[]; discount: number; freight: number; observations?: string; payments: PaymentSplit[]; idempotencyKey: string }) => {
+const createOrder = async (input: { customerId?: string; sellerId: string; salesChannelId?: string; businessUnitId?: string; categoryId?: string; items: SaleItem[]; discount: number; freight: number; observations?: string; payments: PaymentSplit[]; idempotencyKey: string }) => {
   const customerId = input.customerId ?? await findFinalConsumerId();
   const total = input.items.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0) - input.discount + input.freight;
   const itemNotes = input.items.filter(item => item.comment?.trim()).map(item => `${item.sku}: ${item.comment?.trim()}`).join(' | ');
@@ -203,6 +203,7 @@ const createOrder = async (input: { customerId?: string; sellerId: string; sales
     numeroLoja: input.idempotencyKey,
     contato: { id: Number(customerId) },
     vendedor: { id: Number(input.sellerId) },
+    categoria: input.categoryId ? { id: Number(input.categoryId) } : undefined,
     loja: input.salesChannelId ? { id: Number(input.salesChannelId) } : undefined,
     unidadeNegocio: input.businessUnitId ? { id: Number(input.businessUnitId) } : undefined,
     itens: input.items.map(item => ({
@@ -239,6 +240,71 @@ const createOrder = async (input: { customerId?: string; sellerId: string; sales
     number = textValue(detailBody.data?.numero);
   }
   return { id, number, status: 'CONFIRMED' as const };
+};
+
+let categoriesCache: { expires: number; data: { id: string; name: string; type: number; active: boolean; isDefault: boolean }[] } | undefined;
+const fetchFinancialCategories = async () => {
+  if (categoriesCache && categoriesCache.expires > Date.now()) return categoriesCache.data;
+  const response = await blingRequest('/categorias/receitas-despesas?pagina=1&limite=100&tipo=2&situacao=1');
+  if (!response.ok) return blingFailure(response, 'consulta de categorias financeiras');
+  const rows = records(await response.json());
+  const data = rows.map(row => {
+    const name = textValue(row.descricao ?? row.nome) ?? '';
+    return {
+      id: textValue(row.id) ?? '',
+      name,
+      type: numericValue(row.tipo),
+      active: activeValue(row.situacao),
+      isDefault: /vendas? de mercadorias/i.test(name)
+    };
+  }).filter(item => item.id && item.name && item.active);
+  categoriesCache = { expires: Date.now() + 5 * 60_000, data };
+  return data;
+};
+
+let attendedStatusCache: { expires: number; id: string } | undefined;
+const findAttendedStatusId = async () => {
+  const configured = process.env.BLING_ATTENDED_STATUS_ID?.trim();
+  if (configured) return configured;
+  if (attendedStatusCache && attendedStatusCache.expires > Date.now()) return attendedStatusCache.id;
+  const modulesResponse = await blingRequest('/situacoes/modulos');
+  if (!modulesResponse.ok) return blingFailure(modulesResponse, 'consulta dos módulos de situação');
+  const module = records(await modulesResponse.json()).find(row => /pedid.*venda|venda/i.test(`${textValue(row.nome) ?? ''} ${textValue(row.descricao) ?? ''}`));
+  const moduleId = module ? textValue(module.id) : undefined;
+  if (!moduleId) throw new Error('Bling não retornou o módulo de pedidos de venda');
+  const situationsResponse = await blingRequest(`/situacoes/modulos/${encodeURIComponent(moduleId)}`);
+  if (!situationsResponse.ok) return blingFailure(situationsResponse, 'consulta das situações de pedido');
+  const attended = records(await situationsResponse.json()).find(row => /^atendid[oa]$/i.test((textValue(row.nome) ?? '').trim()));
+  const id = attended ? textValue(attended.id) : undefined;
+  if (!id) throw new Error('Crie ou disponibilize a situação Atendido para pedidos de venda no Bling');
+  attendedStatusCache = { expires: Date.now() + 10 * 60_000, id };
+  return id;
+};
+
+const acceptOrderAction = async (response: Response, operation: string) => {
+  if (response.ok || response.status === 204) return;
+  const detail = await response.text();
+  if (response.status === 409 && /já|ja|lançad|lancad|atendid/i.test(detail)) return;
+  throw new Error(`Bling: ${operation} falhou (HTTP ${response.status})${detail ? `: ${detail.slice(0, 500)}` : ''}`);
+};
+const finalizeOrder = async (orderId: string) => {
+  await acceptOrderAction(await blingRequest(`/pedidos/vendas/${encodeURIComponent(orderId)}/lancar-estoque`, { method: 'POST' }), 'lançamento de estoque');
+  await acceptOrderAction(await blingRequest(`/pedidos/vendas/${encodeURIComponent(orderId)}/lancar-contas`, { method: 'POST' }), 'lançamento de contas');
+  const statusId = await findAttendedStatusId();
+  await acceptOrderAction(await blingRequest(`/pedidos/vendas/${encodeURIComponent(orderId)}/situacoes/${encodeURIComponent(statusId)}`, { method: 'PATCH' }), 'alteração do pedido para Atendido');
+  return { stockPosted: true, accountsPosted: true, attended: true, statusId };
+};
+const deleteOrder = async (orderId: string) => {
+  for (const action of ['estornar-contas', 'estornar-estoque']) {
+    const actionResponse = await blingRequest(`/pedidos/vendas/${encodeURIComponent(orderId)}/${action}`, { method: 'POST' });
+    if (!actionResponse.ok && ![204, 404, 409].includes(actionResponse.status)) {
+      const detail = await actionResponse.text();
+      throw new Error(`Bling: ${action === 'estornar-contas' ? 'estorno das contas' : 'estorno do estoque'} falhou (HTTP ${actionResponse.status})${detail ? `: ${detail.slice(0, 500)}` : ''}`);
+    }
+  }
+  const response = await blingRequest(`/pedidos/vendas/${encodeURIComponent(orderId)}`, { method: 'DELETE' });
+  if (!response.ok && response.status !== 204 && response.status !== 404) return blingFailure(response, 'exclusão do pedido');
+  return { deleted: true };
 };
 const generateNfce = async (orderId: string) => {
   const response = await blingRequest(`/pedidos/vendas/${encodeURIComponent(orderId)}/gerar-nfce`, { method: 'POST' });
@@ -411,7 +477,7 @@ export const getFidelizeiConnectionStatus = async () => {
   }
 };
 
-export const bling = { products: searchProducts, syncProducts, sellers: fetchSellers, paymentMethods: fetchPayments, salesChannels: fetchSalesChannels, financialAccounts: fetchFinancialAccounts, cashEntries: fetchCashEntries, createCashEntry, findCustomer: findBlingCustomer, createOrder, generateNfce, getFiscalCapability };
+export const bling = { products: searchProducts, syncProducts, sellers: fetchSellers, paymentMethods: fetchPayments, financialCategories: fetchFinancialCategories, salesChannels: fetchSalesChannels, financialAccounts: fetchFinancialAccounts, cashEntries: fetchCashEntries, createCashEntry, findCustomer: findBlingCustomer, createOrder, finalizeOrder, deleteOrder, generateNfce, getFiscalCapability };
 export const fidelizei = {
   findCustomer: async (cpf: string) => {
     const normalized = cpf.replace(/\D/g, '');
@@ -478,3 +544,5 @@ export const fidelizei = {
     return unwrap(await response.json());
   }
 };
+
+

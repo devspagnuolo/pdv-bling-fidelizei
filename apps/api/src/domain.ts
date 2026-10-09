@@ -38,9 +38,11 @@ export type SaleItem = { productId: string; sku: string; name: string; quantity:
 export type PaymentSplit = { paymentMethodId: string; paymentMethodName?: string; amount: number; receivedAmount?: number; change?: number };
 export type Sale = {
   id: string;
-  status: 'OPEN' | 'PROCESSING' | 'COMPLETED' | 'SYNC_FAILED' | 'RECONCILIATION_REQUIRED';
+  status: 'OPEN' | 'PROCESSING' | 'COMPLETED' | 'SYNC_FAILED' | 'RECONCILIATION_REQUIRED' | 'CANCELLED';
   operatorId: string;
   sellerId: string;
+  categoryId?: string;
+  categoryName?: string;
   cashSessionId: string;
   customer?: Customer;
   items: SaleItem[];
@@ -60,6 +62,8 @@ export type Sale = {
   total: number;
   blingOrderId?: string;
   blingOrderNumber?: string;
+  blingFulfillment?: { stockPosted: boolean; accountsPosted: boolean; attended: boolean; statusId?: string };
+  cancelledAt?: string;
   fiscalDocumentUrl?: string;
   fiscalStatus?: 'NOT_REQUESTED' | 'REQUESTED' | 'FAILED';
   fidelizeiTransactionId?: string;
@@ -67,3 +71,5 @@ export type Sale = {
   createdAt: string;
 };
 export const money = (n: number) => Math.round(n * 100) / 100;
+
+

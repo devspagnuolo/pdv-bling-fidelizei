@@ -40,6 +40,7 @@ type IntegrationStatus = {
 type Item = Product & { quantity: number; comment?: string };
 type PaymentEntry = { key: string; paymentMethodId: string; amount: string; receivedAmount: string; touched?: boolean };
 type CashAccount = { id: string; name: string; type: string; active: boolean };
+type FinancialCategory = { id: string; name: string; type: number; active: boolean; isDefault?: boolean };
 type SalesChannel = { id: string; name: string; businessUnitId?: string; businessUnitName?: string; active: boolean };
 type CashSession = { id: string; operatorId: string; sellerId: string; accountId: string; accountName: string; channelId?: string; channelName?: string; businessUnitId?: string; businessUnitName?: string; status: 'OPEN' | 'CLOSED'; openingAmount: number; openedAt: string };
 type CashDay = {
@@ -53,7 +54,7 @@ type CashDay = {
   pendingSales: number;
   canClose?: boolean;
 };
-type OperationModal = 'open' | 'withdrawal' | 'supply' | 'close' | 'control' | 'return' | 'pending';
+type OperationModal = 'open' | 'withdrawal' | 'supply' | 'close' | 'control' | 'orders' | 'return' | 'pending';
 type Step = 'product' | 'customer' | 'payment';
 type AuthPrincipal = { operatorId: string; operatorName: string; role: 'OPERATOR' | 'MANAGER' };
 const storedPrincipal = (): Partial<AuthPrincipal> => {
@@ -111,6 +112,8 @@ function App() {
   const [payments, setPayments] = useState<PaymentEntry[]>([]);
   const [menuOpen, setMenuOpen] = useState(false);
   const [cashAccounts, setCashAccounts] = useState<CashAccount[]>([]);
+  const [financialCategories, setFinancialCategories] = useState<FinancialCategory[]>([]);
+  const [categoryId, setCategoryId] = useState('');
   const [salesChannels, setSalesChannels] = useState<SalesChannel[]>([]);
   const [selectedChannel, setSelectedChannel] = useState('');
   const [selectedBusinessUnit, setSelectedBusinessUnit] = useState('');
@@ -124,6 +127,7 @@ function App() {
   const [operationBusy, setOperationBusy] = useState(false);
   const [completing, setCompleting] = useState(false);
   const [recentSales, setRecentSales] = useState<any[]>([]);
+  const [orders, setOrders] = useState<any[]>([]);
   const [pendingOperations, setPendingOperations] = useState<any>();
   const [cashControl, setCashControl] = useState<any>();
   const [receipt, setReceipt] = useState<any>();
@@ -203,6 +207,10 @@ function App() {
       const defaultId = methods.find(method => method.isDefault)?.id ?? methods[0]?.id ?? '';
       setPayments(defaultId ? [{ key: newPaymentKey(), paymentMethodId: defaultId, amount: '0', receivedAmount: '' }] : []);
     }).catch(() => setMessage('Não foi possível carregar os dados sincronizados do PDV.'));
+    load<FinancialCategory[]>('/catalog/financial-categories').then(categories => {
+      setFinancialCategories(categories);
+      setCategoryId(categories.find(category => category.isDefault)?.id ?? categories.find(category => /vendas? de mercadorias/i.test(category.name))?.id ?? categories[0]?.id ?? '');
+    }).catch(() => setMessage('Autorize no aplicativo Bling o acesso às categorias financeiras para registrar Vendas de mercadorias.'));
   }, []);
 
   useEffect(() => {
@@ -414,6 +422,7 @@ function App() {
         cashSessionId: cashSession.id,
         operatorId,
         sellerId: seller,
+        categoryId,
         customerCpf: customer?.found ? customer.cpf : undefined,
         manualDiscount,
         freight,
@@ -551,7 +560,10 @@ function App() {
         paymentTotals.push({ name: 'Dinheiro', amount: data.expectedCash });
       }
       setDayHistory({ ...data, paymentTotals });
-      setCountedValues({});
+      setCountedValues(Object.fromEntries(paymentTotals.map((item: { name: string; amount: number }) => [
+        item.name,
+        String(/dinheiro|cash/i.test(item.name) ? data.expectedCash : item.amount).replace('.', ',')
+      ])));
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Falha ao consultar o movimento do dia.');
       setOperationModal(undefined);
@@ -567,6 +579,14 @@ function App() {
     if (type === 'close') void loadCashDay();
     if (type === 'return') {
       apiFetch(`${api}/sales/recent?limit=15`).then(response => response.json()).then(setRecentSales).catch(() => setRecentSales([]));
+    }
+    if (type === 'orders') {
+      setOrders([]);
+      apiFetch(`${api}/sales/orders?limit=100`).then(async response => {
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.message ?? 'Não foi possível consultar os pedidos.');
+        return data;
+      }).then(setOrders).catch(error => setMessage(error instanceof Error ? error.message : 'Falha ao consultar pedidos.'));
     }
     if (type === 'control') {
       setCashControl(undefined);
@@ -644,6 +664,19 @@ function App() {
     } catch (error) { setMessage(error instanceof Error ? error.message : 'Falha ao fechar o caixa.'); }
     finally { setOperationBusy(false); }
   };
+  const cancelOrder = async (order: any) => {
+    const label = order.blingOrderNumber ?? order.blingOrderId ?? order.id.slice(0, 8);
+    if (!window.confirm(`Excluir o pedido ${label}? A operação estornará contas e estoque e será refletida no Bling.`)) return;
+    setOperationBusy(true);
+    try {
+      const response = await apiFetch(`${api}/sales/${encodeURIComponent(order.id)}`, { method: 'DELETE' });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.message ?? 'Não foi possível excluir o pedido.');
+      setOrders(current => current.map(item => item.id === order.id ? data : item));
+      setMessage(data.loyaltyWarning ? `Pedido excluído no Bling. Atenção: ${data.loyaltyWarning}` : `Pedido ${label} excluído e estornado no Bling.`);
+    } catch (error) { setMessage(error instanceof Error ? error.message : 'Falha ao excluir o pedido.'); }
+    finally { setOperationBusy(false); }
+  };
 
   return <main>
     <header className="pos-header">
@@ -656,14 +689,15 @@ function App() {
           <button className="operations-trigger" onClick={() => setMenuOpen(value => !value)} aria-expanded={menuOpen}>Operações <b>•••</b></button>
           {menuOpen && <div className="operations-menu">
             <strong>Operações do caixa</strong>
-            <button disabled={!cashSession || (authEnabled && authRole !== 'MANAGER')} onClick={() => openOperation('withdrawal')}><span>↘</span><div>Sangria<small>Registra débito em Caixas e Bancos</small></div></button>
-            <button disabled={!cashSession || (authEnabled && authRole !== 'MANAGER')} onClick={() => openOperation('supply')}><span>↗</span><div>Suprimento<small>Registra crédito em Caixas e Bancos</small></div></button>
-            <button disabled={!cashSession || (authEnabled && authRole !== 'MANAGER')} onClick={() => openOperation('close')}><span>□</span><div>Fechar caixa<small>Conferir o movimento do dia</small></div></button>
+            <button disabled={!cashSession} onClick={() => openOperation('withdrawal')}><span>↘</span><div>Sangria<small>Registra débito em Caixas e Bancos</small></div></button>
+            <button disabled={!cashSession} onClick={() => openOperation('supply')}><span>↗</span><div>Suprimento<small>Registra crédito em Caixas e Bancos</small></div></button>
+            <button disabled={!cashSession} onClick={() => openOperation('close')}><span>□</span><div>Fechar caixa<small>Conferir o movimento do dia</small></div></button>
             <button disabled={!cashSession} onClick={() => openOperation('control')}><span>▥</span><div>Controle de caixa<small>Vendas, pagamentos e movimentações</small></div></button>
+            <button onClick={() => openOperation('orders')}><span>☷</span><div>Pedidos do PDV<small>Consultar, conferir e excluir no Bling</small></div></button>
             <button onClick={() => printReceipt()} disabled={!sale?.blingOrderId}><span>▣</span><div>Imprimir<small>Comprovante da venda atual</small></div></button>
             <button onClick={() => void reprintLast()}><span>▤</span><div>Reimprimir última operação<small>Busca a última venda concluída</small></div></button>
             <button onClick={() => openOperation('return')}><span>↩</span><div>Gerar devolução<small>Selecionar pedido e continuar no Bling</small></div></button>
-            <button disabled={authEnabled && authRole !== 'MANAGER'} onClick={() => openOperation('pending')}><span>!</span><div>Pendências de sincronização<small>Vendas, caixa e webhooks que exigem atenção</small></div></button>
+            <button onClick={() => openOperation('pending')}><span>!</span><div>Pendências de sincronização<small>Vendas, caixa e webhooks que exigem atenção</small></div></button>
             <div className="menu-routing"><b>{cashSession ? `Caixa aberto · ${cashSession.accountName}` : 'Caixa fechado'}</b><small>Movimentos financeiros são enviados ao Bling. Nenhuma operação é simulada.</small></div>
           </div>}
         </div>
@@ -805,6 +839,7 @@ function App() {
 
           <section className="sale-details">
             <label>Vendedor do Bling<select value={seller} disabled={Boolean(sale?.coupon)} onChange={e => { setSeller(e.target.value); setSale(undefined); }}><option value="">Selecione o vendedor responsável</option>{sellers.map(item => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
+            <label>Categoria financeira<select value={categoryId} disabled={Boolean(sale?.coupon)} onChange={e => { setCategoryId(e.target.value); setSale(undefined); }}><option value="">Selecione</option>{financialCategories.map(item => <option value={item.id} key={item.id}>{item.name}</option>)}</select><small>Usada no lançamento de Contas a Receber do Bling.</small></label>
             {!sellers.length && <p className="inline-warning">Nenhum vendedor retornado pelo Bling. Reconecte a integração e atualize a página.</p>}
             <label>Observações da venda<textarea value={observations} disabled={Boolean(sale?.coupon)} onChange={e => { setObservations(e.target.value); setSale(undefined); }} placeholder="Ex.: venda online, retirada, instruções de troca ou entrega" /></label>
             <div className="output-choice">
@@ -822,7 +857,7 @@ function App() {
             <span>Pagamento <b>{paymentsValid ? payments.length > 1 ? `${payments.length} formas` : paymentMethods.find(item => item.id === payments[0]?.paymentMethodId)?.name : 'Distribua o total'}</b></span>
             <span>Vendedor <b>{sellers.find(item => item.id === seller)?.name ?? 'Selecione'}</b></span>
           </div>
-          <div className="nav-actions"><button className="secondary" onClick={() => setStep('customer')}>Voltar</button><button className="finish" disabled={!cashSession || completing || !items.length || !seller || !paymentsValid} onClick={complete}>{completing ? 'Finalizando no Bling…' : `Finalizar venda · ${brl.format(total)}`}</button></div>
+          <div className="nav-actions"><button className="secondary" onClick={() => setStep('customer')}>Voltar</button><button className="finish" disabled={!cashSession || completing || !items.length || !seller || !categoryId || !paymentsValid} onClick={complete}>{completing ? 'Finalizando no Bling…' : `Finalizar venda · ${brl.format(total)}`}</button></div>
         </>}
         {message && <p className={sale?.status === 'COMPLETED' ? 'message success' : 'message'}>{message}</p>}
       </article>
@@ -841,7 +876,7 @@ function App() {
           <div className="cart-total"><span>Total</span><strong>{brl.format(total)}</strong></div>
           {step === 'product' && <button className="cart-primary" disabled={!items.length} onClick={() => setStep('customer')}>Identificar cliente <kbd>F4</kbd></button>}
           {step === 'customer' && <button className="cart-primary" disabled={!items.length} onClick={() => setStep('payment')}>Ir para pagamento <kbd>F10</kbd></button>}
-          {step === 'payment' && <button className="cart-primary" disabled={!cashSession || completing || !items.length || !seller || !paymentsValid} onClick={complete}>{completing ? 'Finalizando…' : `Finalizar · ${brl.format(total)}`}</button>}
+          {step === 'payment' && <button className="cart-primary" disabled={!cashSession || completing || !items.length || !seller || !categoryId || !paymentsValid} onClick={complete}>{completing ? 'Finalizando…' : `Finalizar · ${brl.format(total)}`}</button>}
         </div>
       </aside>
     </section>
@@ -862,7 +897,7 @@ function App() {
     {operationModal && <div className="operation-overlay" role="dialog" aria-modal="true" aria-label="Operação de caixa">
       <section className="operation-dialog">
         <div className="operation-dialog-title">
-          <div><small>OPERAÇÕES DO CAIXA</small><h2>{operationModal === 'open' ? 'Abrir caixa' : operationModal === 'withdrawal' ? 'Sangria' : operationModal === 'supply' ? 'Suprimento' : operationModal === 'close' ? 'Fechar caixa' : operationModal === 'control' ? 'Controle de caixa' : operationModal === 'return' ? 'Gerar devolução' : 'Pendências de sincronização'}</h2></div>
+          <div><small>OPERAÇÕES DO CAIXA</small><h2>{operationModal === 'open' ? 'Abrir caixa' : operationModal === 'withdrawal' ? 'Sangria' : operationModal === 'supply' ? 'Suprimento' : operationModal === 'close' ? 'Fechar caixa' : operationModal === 'control' ? 'Controle de caixa' : operationModal === 'orders' ? 'Pedidos do PDV' : operationModal === 'return' ? 'Gerar devolução' : 'Pendências de sincronização'}</h2></div>
           <button onClick={() => setOperationModal(undefined)} aria-label="Fechar">×</button>
         </div>
         {operationModal === 'open' && <div className="operation-form">
@@ -909,7 +944,7 @@ function App() {
               <div><small>Total vendido</small><b>{brl.format(dayHistory.salesTotal)}</b></div>
               <div><small>Lançamentos Bling</small><b>{dayHistory.blingEntries.length}</b></div>
             </div>
-            {dayHistory.pendingSales > 0 && <p className="inline-warning">Há {dayHistory.pendingSales} venda(s) pendente(s) de sincronização. O fechamento fica bloqueado até a conferência.</p>}
+            {dayHistory.pendingSales > 0 && <p className="inline-warning">Há {dayHistory.pendingSales} venda(s) pendente(s) de sincronização. Elas permanecerão na gestão de pedidos e não impedem o fechamento.</p>}
             <h3>Conferência por forma de pagamento</h3>
             <p className="muted">Confira o valor físico/operacional antes de fechar. Os valores registrados vêm das vendas deste PDV.</p>
             <div className="counted-list">{dayHistory.paymentTotals.length ? dayHistory.paymentTotals.map(item => {
@@ -920,8 +955,15 @@ function App() {
             <h3>Histórico financeiro do Bling</h3>
             <div className="bling-history">{dayHistory.blingEntries.length ? dayHistory.blingEntries.map(entry => <div key={entry.id}><span>{entry.description}<small>{entry.accountName ?? cashSession?.accountName}</small></span><b className={entry.direction === 'D' ? 'debit' : 'credit'}>{entry.direction === 'D' ? '−' : '+'} {brl.format(entry.amount)}</b></div>) : <div className="empty-state compact">Sem lançamentos no Bling para esta conta hoje.</div>}</div>
             <label>Observação do fechamento<textarea value={operationNotes} onChange={event => setOperationNotes(event.target.value)} placeholder="Opcional" /></label>
-            <div className="dialog-actions"><button className="secondary" onClick={() => setOperationModal(undefined)}>Cancelar</button><button className="finish" disabled={operationBusy || dayHistory.pendingSales > 0 || dayHistory.paymentTotals.some(item => countedValues[item.name] === undefined || countedValues[item.name].trim() === '')} onClick={() => void closeCash()}>{operationBusy ? 'Sincronizando…' : 'Confirmar fechamento'}</button></div>
+            <div className="dialog-actions"><button className="secondary" onClick={() => setOperationModal(undefined)}>Cancelar</button><button className="finish" disabled={operationBusy} onClick={() => void closeCash()}>{operationBusy ? 'Sincronizando…' : 'Confirmar fechamento'}</button></div>
           </>}
+        </div>}
+        {operationModal === 'orders' && <div className="return-list order-management">
+          <p>Pedidos gerados neste PDV. A exclusão estorna contas e estoque e remove o pedido correspondente no Bling.</p>
+          {orders.length ? orders.map(item => <div key={item.id}>
+            <span><b>Pedido {item.blingOrderNumber ?? item.blingOrderId ?? item.id.slice(0, 8)}</b><small>{new Date(item.createdAt).toLocaleString('pt-BR')} · {brl.format(item.total)}</small><small>{item.status}{item.categoryName ? ` · ${item.categoryName}` : ''}{item.lastError ? ` · ${item.lastError}` : ''}</small></span>
+            <button className="danger-action" disabled={operationBusy || item.status === 'CANCELLED' || item.status === 'PROCESSING'} onClick={() => void cancelOrder(item)}>{item.status === 'CANCELLED' ? 'Excluído' : 'Excluir no Bling'}</button>
+          </div>) : <div className="empty-state compact">Nenhum pedido registrado neste PDV.</div>}
         </div>}
         {operationModal === 'pending' && <div className="return-list pending-list">
           {!pendingOperations ? <div className="empty-state">Consultando pendências…</div> : <>
@@ -991,3 +1033,5 @@ function App() {
 }
 
 createRoot(document.getElementById('root')!).render(<StrictMode><App /></StrictMode>);
+
+

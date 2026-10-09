@@ -248,6 +248,7 @@ app.get('/catalog/products', async (req) => {
 });
 app.get('/catalog/sellers', async () => bling.sellers());
 app.get('/catalog/payment-methods', async () => bling.paymentMethods());
+app.get('/catalog/financial-categories', async () => bling.financialCategories());
 const todayInSaoPaulo = () => new Intl.DateTimeFormat('sv-SE', { timeZone: 'America/Sao_Paulo' }).format(new Date());
 const requireDatabase = () => {
   if (!pool) throw Object.assign(new Error('Banco de dados do PDV indisponível para operações de caixa'), { statusCode: 503 });
@@ -385,7 +386,6 @@ app.post('/cash/sessions/open', async (req) => {
   return { session: await currentCashSession(operatorId), openingSyncStatus };
 });
 app.post('/cash/entries', async (req) => {
-  requireManager(req);
   const body = req.body as { operationId?: string; sessionId?: string; type?: 'WITHDRAWAL' | 'SUPPLY'; amount?: number; notes?: string };
   if (!body.sessionId || !['WITHDRAWAL','SUPPLY'].includes(String(body.type))) return badRequest('Operação de caixa inválida');
   const amount = money(Number(body.amount));
@@ -437,7 +437,7 @@ app.get('/cash/day', async (req) => {
     operations: snapshot.operations,
     expectedCash: snapshot.expectedCash,
     pendingSales: snapshot.pendingSales,
-    canClose: snapshot.pendingSales === 0
+    canClose: true
   };
 });
 app.get('/cash/control', async (req) => {
@@ -465,18 +465,17 @@ app.get('/cash/control', async (req) => {
   };
 });
 app.post('/cash/sessions/:id/close', async (req) => {
-  requireManager(req);
   const id = (req.params as { id: string }).id;
   const body = req.body as { countedValues?: { name: string; amount: number }[]; notes?: string };
   const database = requireDatabase();
   const snapshot = await cashSessionSnapshot(id);
   if (snapshot.session.status !== 'OPEN') return badRequest('Caixa já está fechado');
-  if (snapshot.pendingSales > 0) return conflict('Existem vendas pendentes de sincronização. Resolva-as antes de fechar o caixa');
-  const countedValues = body.countedValues ?? [];
-  if (!countedValues.length) return badRequest('Informe os valores conferidos antes de fechar o caixa');
   const expected = new Map(snapshot.paymentTotals.map(item => [item.name, item.amount]));
   const cashName = [...expected.keys()].find(name => /dinheiro|cash/i.test(name)) ?? 'Dinheiro';
   expected.set(cashName, snapshot.expectedCash);
+  const countedValues = body.countedValues?.length
+    ? body.countedValues
+    : [...expected].map(([name, amount]) => ({ name, amount }));
   const counted = new Map(countedValues.map(item => [item.name, money(Number(item.amount) || 0)]));
   const reconciliation = [...new Set([...expected.keys(), ...counted.keys()])].map(name => ({
     name,
@@ -493,6 +492,7 @@ app.post('/cash/sessions/:id/close', async (req) => {
     reconciliation,
     totalDifference: money(reconciliation.reduce((sum, item) => sum + item.difference, 0)),
     expectedCash: snapshot.expectedCash,
+    pendingSalesAtClosing: snapshot.pendingSales,
     notes: body.notes?.trim() || undefined,
     blingEntries: entries
   };
@@ -516,7 +516,6 @@ app.post('/cash/sessions/:id/close', async (req) => {
 });
 
 app.get('/operations/pending', async (req) => {
-  requireManager(req);
   const database = requireDatabase();
   const [salesResult, cashResult, webhookResult] = await Promise.all([
     database.query(
@@ -589,6 +588,7 @@ app.post('/sales', async (req) => {
     cashSessionId?: string;
     operatorId?: string;
     sellerId: string;
+    categoryId?: string;
     items: SaleItem[];
     customerCpf?: string;
     manualDiscount?: number;
@@ -608,6 +608,11 @@ app.post('/sales', async (req) => {
   const customer = lookup?.found ? lookup : undefined;
   const manualDiscount = money(Math.max(0, Number(body.manualDiscount) || 0));
   const freight = money(Math.max(0, Number(body.freight) || 0));
+  const categories = await bling.financialCategories();
+  const category = categories.find(item => item.id === body.categoryId)
+    ?? categories.find(item => item.isDefault)
+    ?? categories.find(item => /vendas? de mercadorias/i.test(item.name));
+  if (!category) return badRequest('A categoria financeira Vendas de mercadorias não foi encontrada no Bling');
   const amounts = calculate(items, manualDiscount, freight);
   const sale: Sale = {
     id: randomUUID(),
@@ -615,6 +620,8 @@ app.post('/sales', async (req) => {
     cashSessionId: session.id,
     operatorId,
     sellerId: body.sellerId,
+    categoryId: category.id,
+    categoryName: category.name,
     customer,
     items,
     manualDiscount,
@@ -721,6 +728,7 @@ app.post('/sales/:id/complete', async (req) => {
     const order = await bling.createOrder({
       customerId: sale.customer?.bling?.id,
       sellerId: sale.sellerId,
+      categoryId: sale.categoryId,
       items: sale.items,
       discount: sale.discount,
       freight: sale.freight ?? 0,
@@ -732,6 +740,14 @@ app.post('/sales/:id/complete', async (req) => {
     });
     sale.blingOrderId = order.id;
     sale.blingOrderNumber = order.number;
+    await persist(sale);
+    let fulfillmentError: string | undefined;
+    try {
+      sale.blingFulfillment = await bling.finalizeOrder(order.id);
+    } catch (error) {
+      fulfillmentError = error instanceof Error ? error.message.slice(0, 500) : 'Falha ao lançar contas, estoque ou marcar o pedido como atendido';
+      app.log.error({ error, saleId: sale.id, blingOrderId: order.id }, 'Pedido criado, mas a finalização automática do Bling exige conferência');
+    }
     if (pool) await pool.query(
       `update bling_products product set stock=product.stock-item.quantity
        from jsonb_to_recordset($1::jsonb) as item("productId" text, quantity numeric)
@@ -767,6 +783,10 @@ app.post('/sales/:id/complete', async (req) => {
         app.log.warn({ error, saleId: sale.id }, 'Venda criada no Bling e pendente no Fidelizei');
       }
     }
+    if (fulfillmentError) {
+      sale.status = 'RECONCILIATION_REQUIRED';
+      sale.lastError = [sale.lastError, fulfillmentError].filter(Boolean).join(' · ').slice(0, 500);
+    }
     await persist(sale);
     return sale;
   } catch (error) {
@@ -794,6 +814,40 @@ app.get('/sales/recent', async (req) => {
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
     .slice(0, limit);
 });
+app.get('/sales/orders', async (req) => {
+  const rawLimit = Number((req.query as { limit?: string }).limit ?? 100);
+  const limit = Math.max(1, Math.min(200, Number.isFinite(rawLimit) ? rawLimit : 100));
+  if (pool) {
+    const result = await pool.query('select data from pdv_sales order by updated_at desc limit $1', [limit]) as { rows: { data: Sale }[] };
+    return result.rows.map(row => row.data);
+  }
+  return [...sales.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, limit);
+});
+app.delete('/sales/:id', async (req) => {
+  const id = (req.params as { id: string }).id;
+  const sale = await getSale(id);
+  if (!sale) return badRequest('Pedido não encontrado no PDV');
+  if (sale.status === 'CANCELLED') return { ...sale, idempotent: true };
+  if (sale.blingOrderId) await bling.deleteOrder(sale.blingOrderId);
+  let loyaltyWarning: string | undefined;
+  if (sale.fidelizeiTransactionId) {
+    try { await fidelizei.reverseSale(sale.id); }
+    catch (error) { loyaltyWarning = error instanceof Error ? error.message.slice(0, 400) : 'Estorno Fidelizei pendente'; }
+  }
+  if (pool && ['COMPLETED', 'RECONCILIATION_REQUIRED'].includes(sale.status)) {
+    await pool.query(
+      `update bling_products product set stock=product.stock+item.quantity
+       from jsonb_to_recordset($1::jsonb) as item("productId" text, quantity numeric)
+       where product.id=item."productId"`,
+      [JSON.stringify(sale.items.map(item => ({ productId: item.productId, quantity: item.quantity })))]
+    );
+  }
+  sale.status = 'CANCELLED';
+  sale.cancelledAt = new Date().toISOString();
+  sale.lastError = loyaltyWarning;
+  await persist(sale);
+  return { ...sale, deletedInBling: Boolean(sale.blingOrderId), loyaltyWarning };
+});
 app.post('/sales/:id/reverse-fidelizei', async (req) => {
   requireManager(req);
   const sale = await getSale((req.params as { id: string }).id);
@@ -808,3 +862,5 @@ const shutdown = async (signal: string) => {
 process.once('SIGTERM', () => void shutdown('SIGTERM'));
 process.once('SIGINT', () => void shutdown('SIGINT'));
 await app.listen({ port: Number(process.env.PORT ?? 3333), host: '0.0.0.0' });
+
+

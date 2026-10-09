@@ -646,7 +646,7 @@ textarea:focus {
   box-shadow: 0 25px 70px rgba(0, 0, 0, .35);
 }
 .receipt-brand { display: grid; justify-items: center; gap: 5px; text-align: center; }
-.receipt-brand img { width: 170px; height: 62px; padding: 7px 10px; object-fit: contain; border-radius: 10px; background: #18191e; }
+.receipt-brand img { width: 170px; height: 62px; padding: 0; object-fit: contain; border-radius: 0; background: transparent; }
 .receipt-brand small { letter-spacing: .12em; }
 .receipt-meta, .receipt-items, .receipt-totals, .receipt-payments { display: grid; gap: 7px; margin-top: 16px; padding-top: 13px; border-top: 1px dashed #999; }
 .receipt-meta span, .receipt-items div, .receipt-totals span, .receipt-totals strong, .receipt-payments span { display: flex; justify-content: space-between; gap: 15px; }
@@ -688,6 +688,7 @@ textarea:focus {
 .counted-list label{display:grid;gap:5px;font-size:13px}.counted-list strong{min-width:130px;text-align:right}.match{color:#087a43}.difference,.debit{color:#b0472e}.credit{color:#087a43}
 .bling-history{max-height:220px;overflow:auto}.bling-history>div,.return-list>div{display:flex;justify-content:space-between;align-items:center;gap:14px;border:1px solid var(--line);border-radius:12px;padding:12px 14px}
 .return-list>p{color:var(--muted)}.return-list button{border:1px solid #bd8500;background:#fff8e6;color:#684900;border-radius:10px;padding:10px 14px;font-weight:800;cursor:pointer}
+.return-list button.danger-action{border-color:#b42318;background:#fff5f4;color:#b42318}.return-list button:disabled{opacity:.5;cursor:not-allowed}
 .dialog-actions{display:grid;grid-template-columns:1fr 2fr;gap:12px}.operations-menu button:disabled{opacity:.45;cursor:not-allowed}
 @media(max-width:900px){.closing-summary{grid-template-columns:1fr}.counted-list>div{grid-template-columns:1fr}.counted-list strong{text-align:left}.cash-status{width:100%}}
 @media print{.operation-overlay{display:none!important}}
@@ -719,5 +720,7 @@ textarea:focus {
 @media print{
   @page{size:80mm auto;margin:0}
   .receipt-sheet{width:80mm;padding:3.5mm;font-size:11px}
-  .receipt-brand img{background:#18191e!important;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  .receipt-brand img{background:transparent!important}
 }
+
+
