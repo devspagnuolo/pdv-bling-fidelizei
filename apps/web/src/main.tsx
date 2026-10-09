@@ -40,7 +40,8 @@ type IntegrationStatus = {
 type Item = Product & { quantity: number; comment?: string };
 type PaymentEntry = { key: string; paymentMethodId: string; amount: string; receivedAmount: string; touched?: boolean };
 type CashAccount = { id: string; name: string; type: string; active: boolean };
-type CashSession = { id: string; operatorId: string; sellerId: string; accountId: string; accountName: string; status: 'OPEN' | 'CLOSED'; openingAmount: number; openedAt: string };
+type SalesChannel = { id: string; name: string; businessUnitId?: string; businessUnitName?: string; active: boolean };
+type CashSession = { id: string; operatorId: string; sellerId: string; accountId: string; accountName: string; channelId?: string; channelName?: string; businessUnitId?: string; businessUnitName?: string; status: 'OPEN' | 'CLOSED'; openingAmount: number; openedAt: string };
 type CashDay = {
   date: string;
   salesCount: number;
@@ -101,6 +102,9 @@ function App() {
   const [payments, setPayments] = useState<PaymentEntry[]>([]);
   const [menuOpen, setMenuOpen] = useState(false);
   const [cashAccounts, setCashAccounts] = useState<CashAccount[]>([]);
+  const [salesChannels, setSalesChannels] = useState<SalesChannel[]>([]);
+  const [selectedChannel, setSelectedChannel] = useState('');
+  const [selectedBusinessUnit, setSelectedBusinessUnit] = useState('');
   const [cashSession, setCashSession] = useState<CashSession>();
   const [operationModal, setOperationModal] = useState<OperationModal>();
   const [operationAmount, setOperationAmount] = useState('');
@@ -195,20 +199,26 @@ function App() {
   useEffect(() => {
     if (!operatorId) return;
     Promise.all([
-      apiFetch(`${api}/cash/accounts`).then(async response => {
+      apiFetch(`${api}/cash/configuration`).then(async response => {
         const data = await response.json();
-        if (!response.ok) throw new Error(data.message ?? 'Não foi possível carregar as contas financeiras do Bling.');
-        return data as CashAccount[];
+        if (!response.ok) throw new Error(data.message ?? 'Não foi possível carregar a configuração de caixa do Bling.');
+        return data as { accounts: CashAccount[]; channels: SalesChannel[] };
       }),
       apiFetch(`${api}/cash/sessions/current?operatorId=${encodeURIComponent(operatorId)}`).then(async response => {
         const data = await response.json();
         if (!response.ok) throw new Error(data.message ?? 'Não foi possível consultar o caixa.');
         return data.session as CashSession | undefined;
       })
-    ]).then(([accounts, session]) => {
+    ]).then(([configuration, session]) => {
+      const accounts = configuration.accounts;
+      const channels = configuration.channels;
       setCashAccounts(accounts);
+      setSalesChannels(channels);
       setCashSession(session);
       setSelectedAccount(session?.accountId ?? accounts[0]?.id ?? '');
+      const channel = channels.find(item => item.id === session?.channelId) ?? channels[0];
+      setSelectedChannel(session?.channelId ?? channel?.id ?? '');
+      setSelectedBusinessUnit(session?.businessUnitId ?? channel?.businessUnitId ?? '');
     }).catch(error => setMessage(error instanceof Error ? error.message : 'Não foi possível consultar o caixa.'));
   }, [operatorId]);
 
@@ -563,12 +573,12 @@ function App() {
     }
   };
   const openCash = async () => {
-    if (!operatorId || !selectedAccount) return setMessage('Selecione o operador e a conta financeira do Bling.');
+    if (!operatorId || !selectedAccount || !selectedChannel || !selectedBusinessUnit) return setMessage('Selecione operador, loja, unidade e conta financeira do Bling.');
     setOperationBusy(true);
     try {
       const response = await apiFetch(`${api}/cash/sessions/open`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ operatorId, sellerId: seller, accountId: selectedAccount, openingAmount: numberValue(operationAmount) })
+        body: JSON.stringify({ operatorId, sellerId: seller, accountId: selectedAccount, channelId: selectedChannel, businessUnitId: selectedBusinessUnit, openingAmount: numberValue(operationAmount) })
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.message ?? 'Não foi possível abrir o caixa.');
@@ -838,10 +848,17 @@ function App() {
           <button onClick={() => setOperationModal(undefined)} aria-label="Fechar">×</button>
         </div>
         {operationModal === 'open' && <div className="operation-form">
-          <p>Selecione uma conta financeira ativa do Bling. Se houver saldo inicial, ele será lançado como crédito em Caixas e Bancos.</p>
-          <label>Conta financeira do Bling<select value={selectedAccount} onChange={event => setSelectedAccount(event.target.value)}><option value="">Selecione</option>{cashAccounts.map(account => <option value={account.id} key={account.id}>{account.name} · {account.type}</option>)}</select></label>
-          <label>Saldo inicial em dinheiro<input value={operationAmount} inputMode="decimal" placeholder="0,00" onChange={event => setOperationAmount(event.target.value)} /></label>
-          <button className="finish" disabled={operationBusy || !selectedAccount} onClick={() => void openCash()}>{operationBusy ? 'Abrindo…' : 'Abrir caixa'}</button>
+          <div className="opening-notice"><b>Caixa fechado</b><span>Selecione a mesma loja e unidade de negócio configuradas no Frente de Caixa do Bling.</span></div>
+          <label>Loja / canal de venda<select value={selectedChannel} onChange={event => {
+            const id = event.target.value;
+            const channel = salesChannels.find(item => item.id === id);
+            setSelectedChannel(id);
+            setSelectedBusinessUnit(channel?.businessUnitId ?? '');
+          }}><option value="">Selecione</option>{salesChannels.map(channel => <option value={channel.id} key={channel.id}>{channel.name}</option>)}</select></label>
+          <label>Unidade de negócio<select value={selectedBusinessUnit} onChange={event => setSelectedBusinessUnit(event.target.value)} disabled={!selectedChannel}><option value="">Selecione</option>{salesChannels.filter(channel => channel.id === selectedChannel && channel.businessUnitId).map(channel => <option value={channel.businessUnitId} key={channel.businessUnitId}>{channel.businessUnitName ?? 'Unidade do Bling'}</option>)}</select></label>
+          <label>Troco / saldo inicial<input value={operationAmount} inputMode="decimal" placeholder="0,00" onChange={event => setOperationAmount(event.target.value)} /></label>
+          <details className="opening-routing"><summary>Conta financeira usada nos lançamentos</summary><label>Conta financeira do Bling<select value={selectedAccount} onChange={event => setSelectedAccount(event.target.value)}><option value="">Selecione</option>{cashAccounts.map(account => <option value={account.id} key={account.id}>{account.name} · {account.type}</option>)}</select></label></details>
+          <button className="finish" disabled={operationBusy || !selectedAccount || !selectedChannel || !selectedBusinessUnit} onClick={() => void openCash()}>{operationBusy ? 'Abrindo…' : 'Abrir caixa'}</button>
         </div>}
         {(operationModal === 'withdrawal' || operationModal === 'supply') && <div className="operation-form">
           <div className="operation-account"><span>Conta financeira</span><b>{cashSession?.accountName}</b></div>
@@ -851,7 +868,7 @@ function App() {
         </div>}
         {operationModal === 'control' && <div className="closing-review cash-control">
           {!cashControl ? <div className="empty-state">Carregando o controle do caixa…</div> : <>
-            <div className="operation-account"><span>Conta financeira</span><b>{cashControl.session.accountName}</b></div>
+            <div className="operation-account"><span>{cashControl.session.channelName ?? 'Loja do Bling'} · {cashControl.session.businessUnitName ?? 'Unidade de negócio'}</span><b>{cashControl.session.accountName}</b></div>
             <div className="closing-summary">
               <div><small>Saldo inicial</small><b>{brl.format(cashControl.session.openingAmount)}</b></div>
               <div><small>Vendas</small><b>{cashControl.salesCount}</b></div>
