@@ -804,14 +804,14 @@ function App() {
           </section>
 
           <section className="sale-details">
-            <label>Vendedor do Bling<select value={seller} onChange={e => { setSeller(e.target.value); setSale(undefined); }}><option value="">Selecione o vendedor responsável</option>{sellers.map(item => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
+            <label>Vendedor do Bling<select value={seller} disabled={Boolean(sale?.coupon)} onChange={e => { setSeller(e.target.value); setSale(undefined); }}><option value="">Selecione o vendedor responsável</option>{sellers.map(item => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
             {!sellers.length && <p className="inline-warning">Nenhum vendedor retornado pelo Bling. Reconecte a integração e atualize a página.</p>}
-            <label>Observações da venda<textarea value={observations} onChange={e => { setObservations(e.target.value); setSale(undefined); }} placeholder="Ex.: venda online, retirada, instruções de troca ou entrega" /></label>
+            <label>Observações da venda<textarea value={observations} disabled={Boolean(sale?.coupon)} onChange={e => { setObservations(e.target.value); setSale(undefined); }} placeholder="Ex.: venda online, retirada, instruções de troca ou entrega" /></label>
             <div className="output-choice">
-              <button className={!emitFiscal ? 'active' : ''} onClick={() => { setEmitFiscal(false); setSale(undefined); }}>
+              <button className={!emitFiscal ? 'active' : ''} disabled={Boolean(sale?.coupon)} onClick={() => { setEmitFiscal(false); setSale(undefined); }}>
                 <span>▣</span><b>Comprovante não fiscal</b><small>Padrão · imprimir após concluir</small>
               </button>
-              <button className={emitFiscal ? 'active fiscal' : ''} onClick={() => { setEmitFiscal(true); setSale(undefined); }}>
+              <button className={emitFiscal ? 'active fiscal' : ''} disabled={Boolean(sale?.coupon)} onClick={() => { setEmitFiscal(true); setSale(undefined); }}>
                 <span>◇</span><b>Emitir NFC-e</b><small>Somente por seleção · configuração Bling</small>
               </button>
             </div>
