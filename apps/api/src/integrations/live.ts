@@ -235,9 +235,26 @@ const generateNfce = async (orderId: string) => {
   const response = await blingRequest(`/pedidos/vendas/${encodeURIComponent(orderId)}/gerar-nfce`, { method: 'POST' });
   if (!response.ok && response.status !== 204) throw new Error(`Bling não gerou a NFC-e (HTTP ${response.status})`);
   const body = response.status === 204 ? {} : await response.json().catch(() => ({})) as { data?: Record<string, unknown> };
-  const data = body.data ?? {};
-  const documentUrl = textValue(data.linkPDF ?? data.linkDanfe ?? data.url);
-  return { status: 'REQUESTED' as const, documentUrl };
+  let fiscalId = textValue(body.data?.id);
+  let documentUrl = textValue(body.data?.linkPDF ?? body.data?.linkDanfe ?? body.data?.url);
+  for (let attempt = 0; attempt < 4 && !documentUrl; attempt += 1) {
+    await delay(650 * (attempt + 1));
+    if (!fiscalId) {
+      const orderResponse = await blingRequest(`/pedidos/vendas/${encodeURIComponent(orderId)}`);
+      if (orderResponse.ok) {
+        const orderBody = await orderResponse.json().catch(() => ({})) as { data?: Record<string, unknown> };
+        const fiscal = orderBody.data?.notaFiscal as Record<string, unknown> | undefined;
+        const consumerFiscal = orderBody.data?.notaFiscalConsumidor as Record<string, unknown> | undefined;
+        fiscalId = textValue(consumerFiscal?.id ?? fiscal?.id ?? orderBody.data?.idNotaFiscal);
+      }
+    }
+    if (!fiscalId) continue;
+    const fiscalResponse = await blingRequest(`/nfce/${encodeURIComponent(fiscalId)}`);
+    if (!fiscalResponse.ok) continue;
+    const fiscalBody = await fiscalResponse.json().catch(() => ({})) as { data?: Record<string, unknown> };
+    documentUrl = textValue(fiscalBody.data?.linkPDF ?? fiscalBody.data?.linkDanfe);
+  }
+  return { status: 'REQUESTED' as const, fiscalId, documentUrl };
 };
 const blingFailure = async (response: Response, operation: string): Promise<never> => {
   const detail = await response.text();
