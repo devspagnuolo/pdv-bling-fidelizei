@@ -57,6 +57,10 @@ export const initializeDatabase = async () => {
     closed_at timestamptz,
     closing_summary jsonb
   )`);
+  await pool.query('alter table pdv_cash_sessions add column if not exists channel_id text');
+  await pool.query('alter table pdv_cash_sessions add column if not exists channel_name text');
+  await pool.query('alter table pdv_cash_sessions add column if not exists business_unit_id text');
+  await pool.query('alter table pdv_cash_sessions add column if not exists business_unit_name text');
   await pool.query(`create unique index if not exists pdv_cash_sessions_operator_open_idx
     on pdv_cash_sessions (operator_id) where status = 'OPEN'`);
   await pool.query(`create table if not exists pdv_cash_operations (
