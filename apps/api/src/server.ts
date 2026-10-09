@@ -257,7 +257,9 @@ const currentCashSession = async (operatorId: string) => {
   const database = requireDatabase();
   const result = await database.query(
     `select id, operator_id as "operatorId", seller_id as "sellerId", account_id as "accountId",
-      account_name as "accountName", status, opening_amount::float8 as "openingAmount",
+      account_name as "accountName", channel_id as "channelId", channel_name as "channelName",
+      business_unit_id as "businessUnitId", business_unit_name as "businessUnitName",
+      status, opening_amount::float8 as "openingAmount",
       opened_at as "openedAt", closed_at as "closedAt", closing_summary as "closingSummary"
      from pdv_cash_sessions where operator_id = $1 and status = 'OPEN' order by opened_at desc limit 1`,
     [operatorId]
@@ -268,7 +270,9 @@ const cashSessionById = async (id: string) => {
   const database = requireDatabase();
   const result = await database.query(
     `select id, operator_id as "operatorId", seller_id as "sellerId", account_id as "accountId",
-      account_name as "accountName", status, opening_amount::float8 as "openingAmount",
+      account_name as "accountName", channel_id as "channelId", channel_name as "channelName",
+      business_unit_id as "businessUnitId", business_unit_name as "businessUnitName",
+      status, opening_amount::float8 as "openingAmount",
       opened_at as "openedAt", closed_at as "closedAt", closing_summary as "closingSummary"
      from pdv_cash_sessions where id = $1 limit 1`,
     [id]
@@ -315,28 +319,40 @@ const cashSessionSnapshot = async (sessionId: string) => {
 };
 
 app.get('/cash/accounts', async () => bling.financialAccounts());
+app.get('/cash/configuration', async () => {
+  const [accounts, channels] = await Promise.all([bling.financialAccounts(), bling.salesChannels()]);
+  return { accounts, channels };
+});
 app.get('/cash/sessions/current', async (req) => {
   const operatorId = principalFromRequest(req)?.operatorId ?? String((req.query as { operatorId?: string }).operatorId ?? '');
   if (!operatorId) return badRequest('Informe o operador do caixa');
   return { session: await currentCashSession(operatorId) ?? null };
 });
 app.post('/cash/sessions/open', async (req) => {
-  const body = req.body as { operatorId?: string; sellerId?: string; accountId?: string; openingAmount?: number };
+  const body = req.body as { operatorId?: string; sellerId?: string; accountId?: string; channelId?: string; businessUnitId?: string; openingAmount?: number };
   const operatorId = principalFromRequest(req)?.operatorId ?? body.operatorId;
-  if (!operatorId || !body.accountId) return badRequest('Operador e conta financeira do Bling são obrigatórios');
+  if (!operatorId || !body.accountId || !body.channelId) return badRequest('Operador, loja e conta financeira do Bling são obrigatórios');
   if (await currentCashSession(operatorId)) return badRequest('Este operador já possui um caixa aberto');
   const accounts = await bling.financialAccounts();
   const account = accounts.find(item => item.id === body.accountId);
   if (!account) return badRequest('Conta financeira não encontrada ou inativa no Bling');
+  const channels = await bling.salesChannels();
+  const channel = channels.find(item => item.id === body.channelId);
+  if (!channel) return badRequest('Loja/canal de venda não encontrado ou inativo no Bling');
+  const businessUnitId = body.businessUnitId ?? channel.businessUnitId;
+  if (!businessUnitId) return badRequest('A loja selecionada não possui unidade de negócio vinculada no Bling');
+  const businessUnitName = channel.businessUnitName ?? 'Unidade do Bling';
   const openingAmount = money(Math.max(0, Number(body.openingAmount) || 0));
   const sessionId = randomUUID();
   const operationId = randomUUID();
   const database = requireDatabase();
   let openingSyncStatus: 'NOT_REQUIRED' | 'SYNCED' | 'PENDING' = 'NOT_REQUIRED';
   await database.query(
-    `insert into pdv_cash_sessions (id, operator_id, seller_id, account_id, account_name, status, opening_amount)
-     values ($1,$2,$3,$4,$5,'OPEN',$6)`,
-    [sessionId, operatorId, body.sellerId ?? operatorId, account.id, account.name, openingAmount]
+    `insert into pdv_cash_sessions (id, operator_id, seller_id, account_id, account_name, channel_id, channel_name,
+       business_unit_id, business_unit_name, status, opening_amount)
+     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,'OPEN',$10)`,
+    [sessionId, operatorId, body.sellerId ?? operatorId, account.id, account.name, channel.id, channel.name,
+      businessUnitId, businessUnitName, openingAmount]
   );
   await database.query(
     `insert into pdv_cash_operations (id, session_id, operation_type, amount, data)
@@ -699,6 +715,8 @@ app.post('/sales/:id/complete', async (req) => {
       discount: sale.discount,
       freight: sale.freight ?? 0,
       observations: sale.observations,
+      salesChannelId: session.channelId,
+      businessUnitId: session.businessUnitId,
       payments,
       idempotencyKey: sale.id
     });
