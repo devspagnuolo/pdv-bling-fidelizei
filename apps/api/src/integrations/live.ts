@@ -137,6 +137,34 @@ const fetchPayments = async (): Promise<PaymentMethod[]> => {
   paymentsCache = { expires: Date.now() + 5 * 60_000, data };
   return data;
 };
+let salesChannelsCache: { expires: number; data: { id: string; name: string; businessUnitId?: string; businessUnitName?: string; active: boolean }[] } | undefined;
+const fetchSalesChannels = async () => {
+  if (salesChannelsCache && salesChannelsCache.expires > Date.now()) return salesChannelsCache.data;
+  const response = await blingRequest('/canais-venda?pagina=1&limite=100');
+  if (!response.ok) throw new Error(`Bling não retornou as lojas/canais de venda (HTTP ${response.status})`);
+  const summaries = records(await response.json());
+  const data = (await Promise.all(summaries.map(async row => {
+    const id = textValue(row.id) ?? '';
+    let detail = row;
+    if (id) {
+      const detailResponse = await blingRequest(`/canais-venda/${encodeURIComponent(id)}`);
+      if (detailResponse.ok) {
+        const detailBody = await detailResponse.json().catch(() => ({})) as { data?: Record<string, unknown> };
+        detail = detailBody.data ?? row;
+      }
+    }
+    const unit = detail.unidadeNegocio as Record<string, unknown> | undefined;
+    return {
+      id,
+      name: textValue(detail.descricao ?? detail.nome) ?? '',
+      businessUnitId: textValue(unit?.id ?? detail.idUnidadeNegocio),
+      businessUnitName: textValue(unit?.nome ?? detail.nomeUnidadeNegocio),
+      active: activeValue(detail.situacao ?? detail.ativo)
+    };
+  }))).filter(item => item.id && item.name && item.active);
+  salesChannelsCache = { expires: Date.now() + 5 * 60_000, data };
+  return data;
+};
 const findBlingCustomer = async (cpf: string): Promise<BlingCustomer | undefined> => {
   const document = cpf.replace(/\D/g, '');
   const response = await blingRequest(`/contatos?pagina=1&limite=1&numeroDocumento=${encodeURIComponent(document)}`);
@@ -355,7 +383,7 @@ export const getFidelizeiConnectionStatus = async () => {
   }
 };
 
-export const bling = { products: searchProducts, syncProducts, sellers: fetchSellers, paymentMethods: fetchPayments, financialAccounts: fetchFinancialAccounts, cashEntries: fetchCashEntries, createCashEntry, findCustomer: findBlingCustomer, createOrder, generateNfce, getFiscalCapability };
+export const bling = { products: searchProducts, syncProducts, sellers: fetchSellers, paymentMethods: fetchPayments, salesChannels: fetchSalesChannels, financialAccounts: fetchFinancialAccounts, cashEntries: fetchCashEntries, createCashEntry, findCustomer: findBlingCustomer, createOrder, generateNfce, getFiscalCapability };
 export const fidelizei = {
   findCustomer: async (cpf: string) => {
     const normalized = cpf.replace(/\D/g, '');
