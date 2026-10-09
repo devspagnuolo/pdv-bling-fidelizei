@@ -104,7 +104,7 @@ const searchProducts = async (query = ''): Promise<Product[]> => {
   const response = await blingRequest(url.pathname.replace('/Api/v3', '') + url.search);
   if (!response.ok) throw new Error(`Bling não retornou os produtos (HTTP ${response.status})`);
   const result = records(await response.json()).map(normalizeProduct).filter((item): item is Product => Boolean(item));
-  void syncProducts().catch(() => undefined);
+  void syncProducts().catch(error => console.error('Falha ao atualizar o catálogo após busca direta', error));
   return result;
 };
 
@@ -263,8 +263,8 @@ const getFiscalCapability = async () => {
   try {
     const response = await blingRequest('/nfce?pagina=1&limite=1');
     return { configured: response.ok, available: response.ok, source: 'BLING' as const, statusCode: response.status };
-  } catch {
-    return { configured: false, available: false, source: 'BLING' as const };
+  } catch (error) {
+    return { configured: false, available: false, source: 'BLING' as const, error: error instanceof Error ? error.message : 'Falha de conexão' };
   }
 };
 

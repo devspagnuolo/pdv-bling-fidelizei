@@ -86,6 +86,8 @@ const reconcileFidelizeiSale = async (sale: Sale) => {
     await persist(sale);
     app.log.info({ saleId: sale.id }, 'Venda reconciliada com o Fidelizei');
   } catch (error) {
+    sale.lastError = error instanceof Error ? error.message.slice(0, 500) : 'Falha desconhecida no Fidelizei';
+    await persist(sale);
     app.log.warn({ error, saleId: sale.id }, 'Fidelizei indisponível; venda continuará pendente');
   }
 };
@@ -127,11 +129,23 @@ app.get('/health', async (_req, reply) => {
     encryptionKeyConfigured: Boolean(process.env.CREDENTIALS_ENCRYPTION_KEY)
   };
 });
-app.get('/integrations/status', async () => ({
-  bling: await getBlingConnectionStatus(),
-  fidelizaPlus: await getFidelizeiConnectionStatus(),
-  fiscal: await bling.getFiscalCapability()
-}));
+let integrationStatusCache: { expires: number; value: unknown } | undefined;
+let integrationStatusPromise: Promise<unknown> | undefined;
+app.get('/integrations/status', async () => {
+  if (integrationStatusCache && integrationStatusCache.expires > Date.now()) return integrationStatusCache.value;
+  if (!integrationStatusPromise) {
+    integrationStatusPromise = (async () => {
+      const value = {
+        bling: await getBlingConnectionStatus(),
+        fidelizaPlus: await getFidelizeiConnectionStatus(),
+        fiscal: await bling.getFiscalCapability()
+      };
+      integrationStatusCache = { expires: Date.now() + 60_000, value };
+      return value;
+    })().finally(() => { integrationStatusPromise = undefined; });
+  }
+  return integrationStatusPromise;
+});
 app.get('/integrations/bling/connect', async (_req, reply) => {
   const clientId = process.env.BLING_CLIENT_ID;
   const redirectUri = process.env.BLING_REDIRECT_URI;
