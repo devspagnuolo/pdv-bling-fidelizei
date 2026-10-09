@@ -141,6 +141,11 @@ let salesChannelsCache: { expires: number; data: { id: string; name: string; bus
 const fetchSalesChannels = async () => {
   if (salesChannelsCache && salesChannelsCache.expires > Date.now()) return salesChannelsCache.data;
   const response = await blingRequest('/canais-venda?pagina=1&limite=100');
+  if (response.status === 401 || response.status === 403) {
+    const data = [{ id: 'DEFAULT', name: 'Configuração padrão do Bling', active: true }];
+    salesChannelsCache = { expires: Date.now() + 5 * 60_000, data };
+    return data;
+  }
   if (!response.ok) throw new Error(`Bling não retornou as lojas/canais de venda (HTTP ${response.status})`);
   const summaries = records(await response.json());
   const data = (await Promise.all(summaries.map(async row => {
