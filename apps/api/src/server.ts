@@ -11,6 +11,7 @@ import {
 import { initializeDatabase, pool } from './db.js';
 import { money, type Customer, type PaymentSplit, type Sale, type SaleItem } from './domain.js';
 import { getWebhookHealth, registerBlingWebhooks } from './webhooks.js';
+import { authConfigured, authenticatePin, issueToken, principalFromRequest, verifyToken } from './auth.js';
 
 const app = Fastify({ logger: true });
 app.removeContentTypeParser('application/json');
@@ -30,6 +31,30 @@ const allowedOrigins = new Set([
 await app.register(cors, {
   origin: (origin, callback) => callback(null, !origin || allowedOrigins.has(origin))
 });
+const loginAttempts = new Map<string, { count: number; resetAt: number }>();
+app.addHook('preHandler', async (req, reply) => {
+  const path = req.url.split('?')[0];
+  const protectedRoute = path.startsWith('/sales') || path.startsWith('/customers') ||
+    path.startsWith('/cash') || path.startsWith('/operations') ||
+    (path === '/catalog/products/sync');
+  if (!protectedRoute) return;
+  if (!authConfigured()) {
+    if (path.startsWith('/operations')) return reply.code(503).send({ message: 'Configure a autenticação do PDV antes de acessar dados operacionais' });
+    return;
+  }
+  const authorization = req.headers.authorization;
+  const token = authorization?.startsWith('Bearer ') ? authorization.slice(7) : undefined;
+  const principal = verifyToken(token);
+  if (!principal) return reply.code(401).send({ message: 'Sessão expirada ou acesso não autorizado' });
+  (req as typeof req & { auth?: typeof principal }).auth = principal;
+});
+const requireManager = (req: Parameters<typeof principalFromRequest>[0]) => {
+  const principal = principalFromRequest(req);
+  if (authConfigured() && principal?.role !== 'MANAGER') {
+    throw Object.assign(new Error('Esta operação exige perfil de gerente'), { statusCode: 403 });
+  }
+  return principal;
+};
 const sales = new Map<string, Sale>();
 const badRequest = (message: string): never => { throw Object.assign(new Error(message), { statusCode: 400 }); };
 const conflict = (message: string): never => { throw Object.assign(new Error(message), { statusCode: 409 }); };
@@ -151,11 +176,33 @@ app.get('/health', async (_req, reply) => {
     pendingSales,
     encryptionKeyConfigured: Boolean(process.env.CREDENTIALS_ENCRYPTION_KEY),
     webhook: await getWebhookHealth(),
-    webhookCompanyConfigured: Boolean(process.env.BLING_COMPANY_ID)
+    webhookCompanyConfigured: Boolean(process.env.BLING_COMPANY_ID),
+    authenticationConfigured: authConfigured()
   };
 });
 let integrationStatusCache: { expires: number; value: unknown } | undefined;
 let integrationStatusPromise: Promise<unknown> | undefined;
+app.get('/auth/status', async () => ({ enabled: authConfigured() }));
+app.post('/auth/login', async (req, reply) => {
+  if (!authConfigured()) return reply.code(503).send({ message: 'Autenticação do PDV ainda não configurada no servidor' });
+  const address = req.ip;
+  const current = loginAttempts.get(address);
+  if (current && current.resetAt > Date.now() && current.count >= 5) {
+    return reply.code(429).send({ message: 'Muitas tentativas. Aguarde cinco minutos' });
+  }
+  const body = req.body as { operatorId?: string; pin?: string };
+  const role = authenticatePin(String(body.pin ?? ''));
+  const seller = body.operatorId ? (await bling.sellers()).find(item => item.id === body.operatorId && item.active) : undefined;
+  if (!role || !seller) {
+    const resetAt = current?.resetAt && current.resetAt > Date.now() ? current.resetAt : Date.now() + 5 * 60_000;
+    loginAttempts.set(address, { count: (current?.resetAt && current.resetAt > Date.now() ? current.count : 0) + 1, resetAt });
+    return reply.code(401).send({ message: 'Operador ou PIN inválido' });
+  }
+  loginAttempts.delete(address);
+  const principal = { operatorId: seller.id, operatorName: seller.name, role };
+  return { token: issueToken(principal), principal };
+});
+
 app.get('/integrations/status', async () => {
   if (integrationStatusCache && integrationStatusCache.expires > Date.now()) return integrationStatusCache.value;
   if (!integrationStatusPromise) {
@@ -193,7 +240,7 @@ app.get('/integrations/bling/callback', async (req, reply) => {
   const webUrl = process.env.PDV_WEB_URL ?? 'https://pdv-bling-fidelizei-web.onrender.com';
   return reply.redirect(`${webUrl}?integration=bling-connected`);
 });
-app.post('/catalog/products/sync', async () => ({ synced: await bling.syncProducts() }));
+app.post('/catalog/products/sync', async (req) => { requireManager(req); return { synced: await bling.syncProducts() }; });
 app.get('/catalog/products', async (req) => {
   const query = (req.query as { query?: string }).query ?? '';
   return bling.products(query);
@@ -268,14 +315,15 @@ const cashSessionSnapshot = async (sessionId: string) => {
 
 app.get('/cash/accounts', async () => bling.financialAccounts());
 app.get('/cash/sessions/current', async (req) => {
-  const operatorId = String((req.query as { operatorId?: string }).operatorId ?? '');
+  const operatorId = principalFromRequest(req)?.operatorId ?? String((req.query as { operatorId?: string }).operatorId ?? '');
   if (!operatorId) return badRequest('Informe o operador do caixa');
   return { session: await currentCashSession(operatorId) ?? null };
 });
 app.post('/cash/sessions/open', async (req) => {
   const body = req.body as { operatorId?: string; sellerId?: string; accountId?: string; openingAmount?: number };
-  if (!body.operatorId || !body.accountId) return badRequest('Operador e conta financeira do Bling são obrigatórios');
-  if (await currentCashSession(body.operatorId)) return badRequest('Este operador já possui um caixa aberto');
+  const operatorId = principalFromRequest(req)?.operatorId ?? body.operatorId;
+  if (!operatorId || !body.accountId) return badRequest('Operador e conta financeira do Bling são obrigatórios');
+  if (await currentCashSession(operatorId)) return badRequest('Este operador já possui um caixa aberto');
   const accounts = await bling.financialAccounts();
   const account = accounts.find(item => item.id === body.accountId);
   if (!account) return badRequest('Conta financeira não encontrada ou inativa no Bling');
@@ -287,7 +335,7 @@ app.post('/cash/sessions/open', async (req) => {
   await database.query(
     `insert into pdv_cash_sessions (id, operator_id, seller_id, account_id, account_name, status, opening_amount)
      values ($1,$2,$3,$4,$5,'OPEN',$6)`,
-    [sessionId, body.operatorId, body.sellerId ?? body.operatorId, account.id, account.name, openingAmount]
+    [sessionId, operatorId, body.sellerId ?? operatorId, account.id, account.name, openingAmount]
   );
   if (openingAmount > 0) {
     await database.query(
@@ -316,9 +364,10 @@ app.post('/cash/sessions/open', async (req) => {
       app.log.error({ error, operationId, sessionId }, 'Abertura registrada localmente, mas pendente no Bling');
     }
   }
-  return { session: await currentCashSession(body.operatorId), openingSyncStatus };
+  return { session: await currentCashSession(operatorId), openingSyncStatus };
 });
 app.post('/cash/entries', async (req) => {
+  requireManager(req);
   const body = req.body as { operationId?: string; sessionId?: string; type?: 'WITHDRAWAL' | 'SUPPLY'; amount?: number; notes?: string };
   if (!body.sessionId || !['WITHDRAWAL','SUPPLY'].includes(String(body.type))) return badRequest('Operação de caixa inválida');
   const amount = money(Number(body.amount));
@@ -374,6 +423,7 @@ app.get('/cash/day', async (req) => {
   };
 });
 app.post('/cash/sessions/:id/close', async (req) => {
+  requireManager(req);
   const id = (req.params as { id: string }).id;
   const body = req.body as { countedValues?: { name: string; amount: number }[]; notes?: string };
   const database = requireDatabase();
@@ -411,7 +461,8 @@ app.post('/cash/sessions/:id/close', async (req) => {
   return { closed: true, sessionId: id, summary };
 });
 
-app.get('/operations/pending', async () => {
+app.get('/operations/pending', async (req) => {
+  requireManager(req);
   const database = requireDatabase();
   const [salesResult, cashResult, webhookResult] = await Promise.all([
     database.query(
@@ -491,12 +542,13 @@ app.post('/sales', async (req) => {
     observations?: string;
     emitFiscal?: boolean;
   };
-  if (!body.cashSessionId || !body.operatorId || !body.sellerId || !body.items?.length) {
+  const operatorId = principalFromRequest(req)?.operatorId ?? body.operatorId;
+  if (!body.cashSessionId || !operatorId || !body.sellerId || !body.items?.length) {
     return badRequest('Caixa aberto, operador, vendedor e itens são obrigatórios');
   }
   const session = await cashSessionById(body.cashSessionId);
   if (!session || session.status !== 'OPEN') return badRequest('Abra o caixa antes de iniciar a venda');
-  if (session.operatorId !== body.operatorId) return badRequest('A venda deve usar o operador responsável pelo caixa aberto');
+  if (session.operatorId !== operatorId) return badRequest('A venda deve usar o operador responsável pelo caixa aberto');
   const items = await canonicalSaleItems(body.items);
   const lookup = body.customerCpf ? await lookupCustomer(body.customerCpf) : undefined;
   const customer = lookup?.found ? lookup : undefined;
@@ -507,7 +559,7 @@ app.post('/sales', async (req) => {
     id: randomUUID(),
     status: 'OPEN',
     cashSessionId: session.id,
-    operatorId: body.operatorId,
+    operatorId,
     sellerId: body.sellerId,
     customer,
     items,
@@ -676,6 +728,7 @@ app.get('/sales/recent', async (req) => {
     .slice(0, limit);
 });
 app.post('/sales/:id/reverse-fidelizei', async (req) => {
+  requireManager(req);
   const sale = await getSale((req.params as { id: string }).id);
   if (!sale?.fidelizeiTransactionId) return badRequest('Venda sem transação Fidelizei para estorno');
   return fidelizei.reverseSale(sale.id);

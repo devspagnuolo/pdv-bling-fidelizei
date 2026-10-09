@@ -54,6 +54,10 @@ type CashDay = {
 };
 type OperationModal = 'open' | 'withdrawal' | 'supply' | 'close' | 'return' | 'pending';
 type Step = 'product' | 'customer' | 'payment';
+type AuthPrincipal = { operatorId: string; operatorName: string; role: 'OPERATOR' | 'MANAGER' };
+const storedPrincipal = (): Partial<AuthPrincipal> => {
+  try { return JSON.parse(sessionStorage.getItem('pdv-auth-principal') ?? '{}'); } catch { return {}; }
+};
 const newPaymentKey = () => globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
 const numberValue = (value: string) => Math.max(0, Number(value.replace(',', '.')) || 0);
 const roundMoney = (value: number) => Math.round(value * 100) / 100;
@@ -80,6 +84,14 @@ function App() {
   const [catalogSearchActive, setCatalogSearchActive] = useState(false);
   const [searchingCatalog, setSearchingCatalog] = useState(false);
   const [seller, setSeller] = useState('');
+  const [operatorId, setOperatorId] = useState(() => String(storedPrincipal().operatorId ?? ''));
+  const [operatorName, setOperatorName] = useState(() => String(storedPrincipal().operatorName ?? ''));
+  const [authRole, setAuthRole] = useState<'OPERATOR' | 'MANAGER' | undefined>(() => storedPrincipal().role);
+  const [authEnabled, setAuthEnabled] = useState<boolean>();
+  const [authToken, setAuthToken] = useState(() => sessionStorage.getItem('pdv-auth-token') ?? '');
+  const [loginOperator, setLoginOperator] = useState('');
+  const [loginPin, setLoginPin] = useState('');
+  const [loginBusy, setLoginBusy] = useState(false);
   const [cpf, setCpf] = useState('');
   const [fidelizeiPhone, setFidelizeiPhone] = useState('');
   const [programConsent, setProgramConsent] = useState(false);
@@ -108,6 +120,27 @@ function App() {
   const [emitFiscal, setEmitFiscal] = useState(false);
   const [message, setMessage] = useState('');
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const apiFetch = async (url: string, init: RequestInit = {}) => {
+    const response = await fetch(url, {
+      ...init,
+      headers: { ...(init.headers ?? {}), ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}) }
+    });
+    if (response.status === 401 && !url.endsWith('/auth/login')) {
+      sessionStorage.removeItem('pdv-auth-token');
+    sessionStorage.removeItem('pdv-auth-principal');
+      setAuthToken('');
+      setOperatorId('');
+      setOperatorName('');
+      setAuthRole(undefined);
+      setMessage('Sua sessão expirou. Entre novamente.');
+    }
+    return response;
+  };
+
+
+  useEffect(() => {
+    apiFetch(`${api}/auth/status`).then(response => response.json()).then(data => setAuthEnabled(data.enabled === true)).catch(() => setAuthEnabled(false));
+  }, []);
 
   useEffect(() => {
     const onShortcut = (event: KeyboardEvent) => {
@@ -121,7 +154,7 @@ function App() {
 
   useEffect(() => {
     const load = async <T,>(path: string): Promise<T> => {
-      const response = await fetch(`${api}${path}`);
+      const response = await apiFetch(`${api}${path}`);
       if (!response.ok) throw new Error(path);
       return response.json();
     };
@@ -137,20 +170,22 @@ function App() {
       setSellers(s);
       setPaymentMethods(methods);
       setSeller(s[0]?.id ?? '');
+      setLoginOperator(s[0]?.id ?? '');
+      if (!authToken) setOperatorId(s[0]?.id ?? '');
       const defaultId = methods.find(method => method.isDefault)?.id ?? methods[0]?.id ?? '';
       setPayments(defaultId ? [{ key: newPaymentKey(), paymentMethodId: defaultId, amount: '0', receivedAmount: '' }] : []);
     }).catch(() => setMessage('Não foi possível carregar os dados sincronizados do PDV.'));
   }, []);
 
   useEffect(() => {
-    if (!seller) return;
+    if (!operatorId) return;
     Promise.all([
-      fetch(`${api}/cash/accounts`).then(async response => {
+      apiFetch(`${api}/cash/accounts`).then(async response => {
         const data = await response.json();
         if (!response.ok) throw new Error(data.message ?? 'Não foi possível carregar as contas financeiras do Bling.');
         return data as CashAccount[];
       }),
-      fetch(`${api}/cash/sessions/current?operatorId=${encodeURIComponent(seller)}`).then(async response => {
+      apiFetch(`${api}/cash/sessions/current?operatorId=${encodeURIComponent(operatorId)}`).then(async response => {
         const data = await response.json();
         if (!response.ok) throw new Error(data.message ?? 'Não foi possível consultar o caixa.');
         return data.session as CashSession | undefined;
@@ -160,7 +195,7 @@ function App() {
       setCashSession(session);
       setSelectedAccount(session?.accountId ?? accounts[0]?.id ?? '');
     }).catch(error => setMessage(error instanceof Error ? error.message : 'Não foi possível consultar o caixa.'));
-  }, [seller]);
+  }, [operatorId]);
 
   const subtotal = useMemo(() => items.reduce((n, x) => n + x.price * x.quantity, 0), [items]);
   const numericDiscount = Math.max(0, Number(discountInput.replace(',', '.')) || 0);
@@ -251,7 +286,7 @@ function App() {
     setSearchingCatalog(true);
     setMessage('');
     try {
-      const response = await fetch(`${api}/catalog/products?query=${encodeURIComponent(term)}`);
+      const response = await apiFetch(`${api}/catalog/products?query=${encodeURIComponent(term)}`);
       const data = await response.json();
       if (!response.ok) throw new Error(data.message ?? 'Não foi possível consultar os produtos.');
       setProducts(data);
@@ -267,7 +302,7 @@ function App() {
   const lookup = async () => {
     setMessage('');
     setCustomer(undefined);
-    const r = await fetch(`${api}/customers/${cpf}`);
+    const r = await apiFetch(`${api}/customers/${cpf}`);
     const data = await r.json().catch(() => undefined);
     if (!r.ok) return setMessage(data?.message ?? 'Não foi possível consultar o cliente.');
     setCustomer(data);
@@ -310,7 +345,7 @@ function App() {
   const enrollFidelizei = async () => {
     if (!customer?.bling || !programConsent) return;
     setMessage('');
-    const response = await fetch(`${api}/customers/fidelizei`, {
+    const response = await apiFetch(`${api}/customers/fidelizei`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -333,12 +368,12 @@ function App() {
       setMessage('Abra o caixa antes de iniciar a venda.');
       return;
     }
-    const r = await fetch(`${api}/sales`, {
+    const r = await apiFetch(`${api}/sales`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         cashSessionId: cashSession.id,
-        operatorId: seller,
+        operatorId,
         sellerId: seller,
         customerCpf: customer?.found ? customer.cpf : undefined,
         manualDiscount,
@@ -363,7 +398,7 @@ function App() {
   const applyCoupon = async () => {
     const activeSale = sale ?? await create();
     if (!activeSale) return;
-    const r = await fetch(`${api}/sales/${activeSale.id}/coupon`, {
+    const r = await apiFetch(`${api}/sales/${activeSale.id}/coupon`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ code: coupon })
@@ -380,7 +415,7 @@ function App() {
     try {
       const activeSale = sale ?? await create();
       if (!activeSale) return;
-      const r = await fetch(`${api}/sales/${activeSale.id}/complete`, {
+      const r = await apiFetch(`${api}/sales/${activeSale.id}/complete`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
@@ -403,6 +438,42 @@ function App() {
     }
   };
 
+  const login = async () => {
+    if (!loginOperator || !loginPin) return setMessage('Selecione o operador e informe o PIN.');
+    setLoginBusy(true);
+    try {
+      const response = await fetch(`${api}/auth/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ operatorId: loginOperator, pin: loginPin })
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.message ?? 'Não foi possível entrar.');
+      const principal = data.principal as AuthPrincipal;
+      sessionStorage.setItem('pdv-auth-token', data.token);
+      sessionStorage.setItem('pdv-auth-principal', JSON.stringify(principal));
+      setAuthToken(data.token);
+      setOperatorId(principal.operatorId);
+      setOperatorName(principal.operatorName);
+      setAuthRole(principal.role);
+      setSeller(current => current || principal.operatorId);
+      setLoginPin('');
+      setMessage('');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Falha no login.');
+    } finally {
+      setLoginBusy(false);
+    }
+  };
+  const logout = () => {
+    sessionStorage.removeItem('pdv-auth-token');
+    setAuthToken('');
+    setOperatorId('');
+    setOperatorName('');
+    setAuthRole(undefined);
+    setCashSession(undefined);
+  };
+
   const printReceipt = (data: any = receipt ?? sale) => {
     if (!data) return setMessage('Finalize uma venda para imprimir o comprovante.');
     setReceipt(data);
@@ -411,7 +482,7 @@ function App() {
   };
   const reprintLast = async () => {
     setMenuOpen(false);
-    const response = await fetch(`${api}/sales/recent?limit=1`);
+    const response = await apiFetch(`${api}/sales/recent?limit=1`);
     const data = await response.json().catch(() => []);
     if (!response.ok || !data?.[0]) return setMessage('Nenhuma venda concluída disponível para reimpressão.');
     setReceipt(data[0]);
@@ -419,8 +490,8 @@ function App() {
   };
 
   const refreshCashSession = async () => {
-    if (!seller) return;
-    const response = await fetch(`${api}/cash/sessions/current?operatorId=${encodeURIComponent(seller)}`);
+    if (!operatorId) return;
+    const response = await apiFetch(`${api}/cash/sessions/current?operatorId=${encodeURIComponent(operatorId)}`);
     const data = await response.json();
     if (!response.ok) throw new Error(data.message ?? 'Não foi possível atualizar o caixa.');
     setCashSession(data.session ?? undefined);
@@ -429,7 +500,7 @@ function App() {
     if (!cashSession) return;
     setOperationBusy(true);
     try {
-      const response = await fetch(`${api}/cash/day?date=${new Date().toLocaleDateString('sv-SE')}&accountId=${encodeURIComponent(cashSession.accountId)}&sessionId=${encodeURIComponent(cashSession.id)}`);
+      const response = await apiFetch(`${api}/cash/day?date=${new Date().toLocaleDateString('sv-SE')}&accountId=${encodeURIComponent(cashSession.accountId)}&sessionId=${encodeURIComponent(cashSession.id)}`);
       const data = await response.json();
       if (!response.ok) throw new Error(data.message ?? 'Não foi possível consultar o movimento do dia no Bling.');
       const paymentTotals = [...data.paymentTotals];
@@ -452,11 +523,11 @@ function App() {
     setOperationModal(type);
     if (type === 'close') void loadCashDay();
     if (type === 'return') {
-      fetch(`${api}/sales/recent?limit=15`).then(response => response.json()).then(setRecentSales).catch(() => setRecentSales([]));
+      apiFetch(`${api}/sales/recent?limit=15`).then(response => response.json()).then(setRecentSales).catch(() => setRecentSales([]));
     }
     if (type === 'pending') {
       setPendingOperations(undefined);
-      fetch(`${api}/operations/pending`).then(async response => {
+      apiFetch(`${api}/operations/pending`).then(async response => {
         const data = await response.json();
         if (!response.ok) throw new Error(data.message ?? 'Não foi possível consultar pendências.');
         return data;
@@ -464,12 +535,12 @@ function App() {
     }
   };
   const openCash = async () => {
-    if (!seller || !selectedAccount) return setMessage('Selecione o operador e a conta financeira do Bling.');
+    if (!operatorId || !selectedAccount) return setMessage('Selecione o operador e a conta financeira do Bling.');
     setOperationBusy(true);
     try {
-      const response = await fetch(`${api}/cash/sessions/open`, {
+      const response = await apiFetch(`${api}/cash/sessions/open`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ operatorId: seller, sellerId: seller, accountId: selectedAccount, openingAmount: numberValue(operationAmount) })
+        body: JSON.stringify({ operatorId, sellerId: seller, accountId: selectedAccount, openingAmount: numberValue(operationAmount) })
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.message ?? 'Não foi possível abrir o caixa.');
@@ -485,7 +556,7 @@ function App() {
     if (!cashSession) return setMessage('Abra o caixa antes de registrar a operação.');
     setOperationBusy(true);
     try {
-      const response = await fetch(`${api}/cash/entries`, {
+      const response = await apiFetch(`${api}/cash/entries`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ operationId: newPaymentKey(), sessionId: cashSession.id, type, amount: numberValue(operationAmount), notes: operationNotes })
       });
@@ -500,7 +571,7 @@ function App() {
     if (!cashSession || !dayHistory) return;
     setOperationBusy(true);
     try {
-      const response = await fetch(`${api}/cash/sessions/${cashSession.id}/close`, {
+      const response = await apiFetch(`${api}/cash/sessions/${cashSession.id}/close`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           countedValues: dayHistory.paymentTotals.map(item => ({ name: item.name, amount: numberValue(countedValues[item.name] ?? '0') })),
@@ -522,20 +593,20 @@ function App() {
     <header className="pos-header">
       <div className="brand-block"><img className="vivi-logo" src="/vivi-logo-original.png" alt="Vivi Moda Plus Size" /><div><small>VIVI MODA · CAIXA 01</small><h1>Frente de caixa</h1><p>Venda integrada ao Bling e Fidelizei</p></div></div>
       <div className="header-actions">
-        <label className="operator-select"><span>Operador / vendedor</span><select value={seller} onChange={e => setSeller(e.target.value)}>
+        {authEnabled ? <div className="operator-select authenticated-operator"><span>Operador</span><b>{operatorName || 'Não autenticado'}</b><small>{authRole === 'MANAGER' ? 'Gerente' : 'Operador'}</small>{authToken && <button onClick={logout}>Sair</button>}</div> : <label className="operator-select"><span>Operador</span><select value={operatorId} onChange={e => setOperatorId(e.target.value)}>
           <option value="">Selecione no Bling</option>{sellers.map(s => <option value={s.id} key={s.id}>{s.name}</option>)}
-        </select></label>
+        </select></label>}
         <div className="operations-wrap">
           <button className="operations-trigger" onClick={() => setMenuOpen(value => !value)} aria-expanded={menuOpen}>Operações <b>•••</b></button>
           {menuOpen && <div className="operations-menu">
             <strong>Operações do caixa</strong>
-            <button disabled={!cashSession} onClick={() => openOperation('withdrawal')}><span>↘</span><div>Sangria<small>Registra débito em Caixas e Bancos</small></div></button>
-            <button disabled={!cashSession} onClick={() => openOperation('supply')}><span>↗</span><div>Suprimento<small>Registra crédito em Caixas e Bancos</small></div></button>
-            <button disabled={!cashSession} onClick={() => openOperation('close')}><span>□</span><div>Fechar caixa<small>Conferir o movimento do dia</small></div></button>
+            <button disabled={!cashSession || (authEnabled && authRole !== 'MANAGER')} onClick={() => openOperation('withdrawal')}><span>↘</span><div>Sangria<small>Registra débito em Caixas e Bancos</small></div></button>
+            <button disabled={!cashSession || (authEnabled && authRole !== 'MANAGER')} onClick={() => openOperation('supply')}><span>↗</span><div>Suprimento<small>Registra crédito em Caixas e Bancos</small></div></button>
+            <button disabled={!cashSession || (authEnabled && authRole !== 'MANAGER')} onClick={() => openOperation('close')}><span>□</span><div>Fechar caixa<small>Conferir o movimento do dia</small></div></button>
             <button onClick={() => printReceipt()} disabled={!sale?.blingOrderId}><span>▣</span><div>Imprimir<small>Comprovante da venda atual</small></div></button>
             <button onClick={() => void reprintLast()}><span>▤</span><div>Reimprimir última operação<small>Busca a última venda concluída</small></div></button>
             <button onClick={() => openOperation('return')}><span>↩</span><div>Gerar devolução<small>Selecionar pedido e continuar no Bling</small></div></button>
-            <button onClick={() => openOperation('pending')}><span>!</span><div>Pendências de sincronização<small>Vendas, caixa e webhooks que exigem atenção</small></div></button>
+            <button disabled={authEnabled && authRole !== 'MANAGER'} onClick={() => openOperation('pending')}><span>!</span><div>Pendências de sincronização<small>Vendas, caixa e webhooks que exigem atenção</small></div></button>
             <div className="menu-routing"><b>{cashSession ? `Caixa aberto · ${cashSession.accountName}` : 'Caixa fechado'}</b><small>Movimentos financeiros são enviados ao Bling. Nenhuma operação é simulada.</small></div>
           </div>}
         </div>
@@ -717,6 +788,19 @@ function App() {
         </div>
       </aside>
     </section>
+
+    {authEnabled && !authToken && <div className="operation-overlay auth-overlay" role="dialog" aria-modal="true" aria-label="Acesso ao PDV">
+      <section className="operation-dialog auth-dialog">
+        <div className="operation-dialog-title"><div><small>ACESSO SEGURO</small><h2>Entrar no frente de caixa</h2></div></div>
+        <div className="operation-form">
+          <p>Selecione seu usuário do Bling e informe o PIN do PDV.</p>
+          <label>Operador<select value={loginOperator} onChange={event => setLoginOperator(event.target.value)}><option value="">Selecione</option>{sellers.map(item => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
+          <label>PIN<input type="password" inputMode="numeric" autoComplete="current-password" value={loginPin} onChange={event => setLoginPin(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') void login(); }} /></label>
+          <button className="finish" disabled={loginBusy || !loginOperator || !loginPin} onClick={() => void login()}>{loginBusy ? 'Entrando…' : 'Entrar'}</button>
+          {message && <p className="message">{message}</p>}
+        </div>
+      </section>
+    </div>}
 
     {operationModal && <div className="operation-overlay" role="dialog" aria-modal="true" aria-label="Operação de caixa">
       <section className="operation-dialog">
