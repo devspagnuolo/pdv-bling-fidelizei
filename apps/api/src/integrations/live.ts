@@ -190,12 +190,24 @@ const createOrder = async (input: { customerId?: string; sellerId: string; items
     const detail = body.message ?? (typeof body.error === 'string' ? body.error : body.retorno ? JSON.stringify(body.retorno) : '');
     throw new Error(`Bling não criou o pedido (HTTP ${response.status})${detail ? `: ${detail.slice(0, 260)}` : ''}`);
   }
-  return { id: String(body.data.id), status: 'CONFIRMED' as const };
+  const id = String(body.data.id);
+  let number: string | undefined;
+  for (let attempt = 0; attempt < 3 && !number; attempt += 1) {
+    if (attempt) await delay(350 * attempt);
+    const detailResponse = await blingRequest(`/pedidos/vendas/${encodeURIComponent(id)}`);
+    if (!detailResponse.ok) continue;
+    const detailBody = await detailResponse.json().catch(() => ({})) as { data?: Record<string, unknown> };
+    number = textValue(detailBody.data?.numero);
+  }
+  return { id, number, status: 'CONFIRMED' as const };
 };
 const generateNfce = async (orderId: string) => {
   const response = await blingRequest(`/pedidos/vendas/${encodeURIComponent(orderId)}/gerar-nfce`, { method: 'POST' });
   if (!response.ok && response.status !== 204) throw new Error(`Bling não gerou a NFC-e (HTTP ${response.status})`);
-  return { status: 'REQUESTED' as const };
+  const body = response.status === 204 ? {} : await response.json().catch(() => ({})) as { data?: Record<string, unknown> };
+  const data = body.data ?? {};
+  const documentUrl = textValue(data.linkPDF ?? data.linkDanfe ?? data.url);
+  return { status: 'REQUESTED' as const, documentUrl };
 };
 const blingFailure = async (response: Response, operation: string): Promise<never> => {
   const detail = await response.text();
@@ -299,7 +311,9 @@ const fidelizeiError = async (response: Response, operation: string): Promise<ne
   const guidance: Record<number, string> = {
     400: 'dados inválidos',
     401: 'chave inválida, vencida ou revogada',
-    403: 'escopo ou plano não liberado',
+    403: operation === 'consumo do cupom'
+      ? 'a chave do PDV não possui o escopo rewards:validate (recrie ou autorize a chave no Fidelizei e atualize FIDELIZEI_API_KEY)'
+      : 'escopo ou plano não liberado',
     404: 'registro não pertence à loja ou não existe',
     409: 'conflito ou operação já utilizada',
     429: 'limite temporário de requisições atingido'
