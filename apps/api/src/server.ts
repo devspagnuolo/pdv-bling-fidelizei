@@ -258,6 +258,7 @@ app.post('/cash/sessions/open', async (req) => {
   const sessionId = randomUUID();
   const operationId = randomUUID();
   const database = requireDatabase();
+  let openingSyncStatus: 'NOT_REQUIRED' | 'SYNCED' | 'PENDING' = 'NOT_REQUIRED';
   await database.query(
     `insert into pdv_cash_sessions (id, operator_id, seller_id, account_id, account_name, status, opening_amount)
      values ($1,$2,$3,$4,$5,'OPEN',$6)`,
@@ -279,16 +280,18 @@ app.post('/cash/sessions/open', async (req) => {
           data=data || '{"syncStatus":"SYNCED"}'::jsonb where id=$1`,
         [operationId, entry.id ?? null]
       );
+      openingSyncStatus = 'SYNCED';
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Falha desconhecida';
       await database.query(
         `update pdv_cash_operations set data=data || $2::jsonb where id=$1`,
         [operationId, JSON.stringify({ syncStatus: 'FAILED', lastError: message.slice(0, 500) })]
       );
+      openingSyncStatus = 'PENDING';
       app.log.error({ error, operationId, sessionId }, 'Abertura registrada localmente, mas pendente no Bling');
     }
   }
-  return { session: await currentCashSession(body.operatorId) };
+  return { session: await currentCashSession(body.operatorId), openingSyncStatus };
 });
 app.post('/cash/entries', async (req) => {
   const body = req.body as { operationId?: string; sessionId?: string; type?: 'WITHDRAWAL' | 'SUPPLY'; amount?: number; notes?: string };

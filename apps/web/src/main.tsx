@@ -466,7 +466,9 @@ function App() {
       if (!response.ok) throw new Error(data.message ?? 'Não foi possível abrir o caixa.');
       setCashSession(data.session);
       setOperationModal(undefined);
-      setMessage(`Caixa aberto na conta ${data.session.accountName}. Saldo inicial registrado no Bling quando informado.`);
+      setMessage(data.openingSyncStatus === 'PENDING'
+        ? `Caixa aberto na conta ${data.session.accountName}. O saldo inicial ficou pendente de conferência no Bling.`
+        : `Caixa aberto na conta ${data.session.accountName}. Saldo inicial registrado no Bling quando informado.`);
     } catch (error) { setMessage(error instanceof Error ? error.message : 'Falha ao abrir o caixa.'); }
     finally { setOperationBusy(false); }
   };
