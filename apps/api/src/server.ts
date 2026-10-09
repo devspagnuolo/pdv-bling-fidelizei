@@ -149,6 +149,7 @@ const reconcilePendingSales = async () => {
 setInterval(() => void reconcilePendingSales().catch(error => app.log.error(error, 'Falha na rotina de reconciliação Fidelizei')), 60_000).unref();
 void reconcilePendingSales().catch(error => app.log.error(error, 'Falha na reconciliação inicial Fidelizei'));
 
+app.get('/', async () => ({ ok: true, service: 'pdv-bling-fidelizei-api' }));
 app.get('/health', async (_req, reply) => {
   let database = false;
   let pendingSales = 0;
