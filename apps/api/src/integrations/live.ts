@@ -187,7 +187,7 @@ const findFinalConsumerId = async () => {
   finalConsumerCache = { expires: Date.now() + 10 * 60_000, id };
   return id;
 };
-const createOrder = async (input: { customerId?: string; sellerId: string; items: SaleItem[]; discount: number; freight: number; observations?: string; payments: PaymentSplit[]; idempotencyKey: string }) => {
+const createOrder = async (input: { customerId?: string; sellerId: string; salesChannelId?: string; businessUnitId?: string; items: SaleItem[]; discount: number; freight: number; observations?: string; payments: PaymentSplit[]; idempotencyKey: string }) => {
   const customerId = input.customerId ?? await findFinalConsumerId();
   const total = input.items.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0) - input.discount + input.freight;
   const itemNotes = input.items.filter(item => item.comment?.trim()).map(item => `${item.sku}: ${item.comment?.trim()}`).join(' | ');
@@ -196,6 +196,8 @@ const createOrder = async (input: { customerId?: string; sellerId: string; items
     numeroLoja: input.idempotencyKey,
     contato: { id: Number(customerId) },
     vendedor: { id: Number(input.sellerId) },
+    loja: input.salesChannelId ? { id: Number(input.salesChannelId) } : undefined,
+    unidadeNegocio: input.businessUnitId ? { id: Number(input.businessUnitId) } : undefined,
     itens: input.items.map(item => ({
       produto: { id: Number(item.productId) },
       codigo: item.sku,
