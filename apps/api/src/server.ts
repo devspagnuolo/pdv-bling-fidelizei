@@ -467,7 +467,7 @@ app.delete('/cash/sessions/:id', async (req, reply) => {
   const session = await cashSessionById(id);
   if (!session) return reply.code(404).send({ message: 'Caixa não encontrado' });
   const [salesResult, movementResult] = await Promise.all([
-    database.query(`select count(*)::int as count from pdv_sales where data->>'cashSessionId'=$1 and status <> 'CANCELLED'`, [id]) as Promise<{ rows: { count: number }[] }>,
+    database.query(`select count(*)::int as count from pdv_sales where data->>'cashSessionId'=$1 and status not in ('CANCELLED','DELETED')`, [id]) as Promise<{ rows: { count: number }[] }>,
     database.query(`select count(*)::int as count from pdv_cash_operations where session_id=$1 and operation_type in ('WITHDRAWAL','SUPPLY')`, [id]) as Promise<{ rows: { count: number }[] }>
   ]);
   if ((salesResult.rows[0]?.count ?? 0) > 0 || (movementResult.rows[0]?.count ?? 0) > 0) {
@@ -826,7 +826,7 @@ app.get('/sales/recent', async (req) => {
     .slice(0, limit);
 });
 app.get('/sales/orders', async (req) => {
-  const query = req.query as { limit?: string; from?: string; to?: string; search?: string; status?: string };
+  const query = req.query as { limit?: string; from?: string; to?: string; search?: string; status?: string; scope?: 'all' | 'active' | 'deleted' | 'cancelled' };
   const rawLimit = Number(query.limit ?? 100);
   const limit = Math.max(1, Math.min(200, Number.isFinite(rawLimit) ? rawLimit : 100));
   if (pool) {
@@ -836,6 +836,9 @@ app.get('/sales/orders', async (req) => {
     if (query.from) filters.push(`(data->>'createdAt')::timestamptz >= ${add(`${query.from}T00:00:00-03:00`)}::timestamptz`);
     if (query.to) filters.push(`(data->>'createdAt')::timestamptz < (${add(`${query.to}T00:00:00-03:00`)}::timestamptz + interval '1 day')`);
     if (query.status) filters.push(`status = ${add(query.status)}`);
+    if (query.scope === 'active') filters.push(`status not in ('CANCELLED','DELETED')`);
+    if (query.scope === 'deleted') filters.push(`status = 'DELETED'`);
+    if (query.scope === 'cancelled') filters.push(`status = 'CANCELLED'`);
     if (query.search?.trim()) {
       const term = add(`%${query.search.trim()}%`);
       filters.push(`(coalesce(data->>'blingOrderNumber','') ilike ${term}
@@ -851,13 +854,14 @@ app.get('/sales/orders', async (req) => {
       values
     ) as { rows: { data: Sale }[] };
     const orders = result.rows.map(row => row.data);
-    const active = orders.filter(item => item.status !== 'CANCELLED');
+    const active = orders.filter(item => !['CANCELLED','DELETED'].includes(item.status));
     return {
       orders,
       summary: {
         count: active.length,
         total: money(active.reduce((sum, item) => sum + item.total, 0)),
-        cancelled: orders.length - active.length
+        cancelled: orders.filter(item => item.status === 'CANCELLED').length,
+        deleted: orders.filter(item => item.status === 'DELETED').length
       }
     };
   }
@@ -865,17 +869,49 @@ app.get('/sales/orders', async (req) => {
     .filter(item => !query.from || item.createdAt.slice(0, 10) >= query.from)
     .filter(item => !query.to || item.createdAt.slice(0, 10) <= query.to)
     .filter(item => !query.status || item.status === query.status)
+    .filter(item => !query.scope || query.scope === 'all'
+      || (query.scope === 'active' && !['CANCELLED','DELETED'].includes(item.status))
+      || (query.scope === 'deleted' && item.status === 'DELETED')
+      || (query.scope === 'cancelled' && item.status === 'CANCELLED'))
     .filter(item => !query.search || JSON.stringify(item).toLowerCase().includes(query.search.toLowerCase()))
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, limit);
-  const active = orders.filter(item => item.status !== 'CANCELLED');
-  return { orders, summary: { count: active.length, total: money(active.reduce((sum, item) => sum + item.total, 0)), cancelled: orders.length - active.length } };
+  const active = orders.filter(item => !['CANCELLED','DELETED'].includes(item.status));
+  return { orders, summary: { count: active.length, total: money(active.reduce((sum, item) => sum + item.total, 0)), cancelled: orders.filter(item => item.status === 'CANCELLED').length, deleted: orders.filter(item => item.status === 'DELETED').length } };
 });
 app.delete('/sales/:id', async (req) => {
   const id = (req.params as { id: string }).id;
   const sale = await getSale(id);
   if (!sale) return badRequest('Pedido não encontrado no PDV');
-  if (sale.status === 'CANCELLED') return { ...sale, idempotent: true };
+  if (sale.status === 'DELETED') return { ...sale, idempotent: true };
+  if (sale.status === 'CANCELLED') return badRequest('Pedido cancelado não pode ser excluído por este fluxo');
   if (sale.blingOrderId) await bling.deleteOrder(sale.blingOrderId);
+  let loyaltyWarning: string | undefined;
+  if (sale.fidelizeiTransactionId) {
+    try { await fidelizei.reverseSale(sale.id); }
+    catch (error) { loyaltyWarning = error instanceof Error ? error.message.slice(0, 400) : 'Estorno Fidelizei pendente'; }
+  }
+  if (pool && ['COMPLETED', 'RECONCILIATION_REQUIRED'].includes(sale.status)) {
+    await pool.query(
+      `update bling_products product set stock=product.stock+item.quantity
+       from jsonb_to_recordset($1::jsonb) as item("productId" text, quantity numeric)
+       where product.id=item."productId"`,
+      [JSON.stringify(sale.items.map(item => ({ productId: item.productId, quantity: item.quantity })))]
+    );
+  }
+  sale.status = 'DELETED';
+  Object.assign(sale, { deletedAt: new Date().toISOString(), deletionKind: 'DELETED' });
+  sale.lastError = loyaltyWarning;
+  await persist(sale);
+  return { ...sale, deletedInBling: Boolean(sale.blingOrderId), loyaltyWarning };
+});
+app.post('/sales/:id/cancel', async (req) => {
+  const id = (req.params as { id: string }).id;
+  const sale = await getSale(id);
+  if (!sale) return badRequest('Pedido não encontrado no PDV');
+  if (sale.status === 'CANCELLED') return { ...sale, idempotent: true };
+  if (sale.status === 'DELETED') return badRequest('Pedido excluído não pode ser cancelado');
+  if (!sale.blingOrderId) return badRequest('Pedido ainda não foi criado no Bling');
+  await bling.cancelOrder(sale.blingOrderId);
   let loyaltyWarning: string | undefined;
   if (sale.fidelizeiTransactionId) {
     try { await fidelizei.reverseSale(sale.id); }
@@ -891,9 +927,9 @@ app.delete('/sales/:id', async (req) => {
   }
   sale.status = 'CANCELLED';
   sale.cancelledAt = new Date().toISOString();
-  sale.lastError = loyaltyWarning;
+  Object.assign(sale, { cancellationKind: 'CANCELLED', lastError: loyaltyWarning });
   await persist(sale);
-  return { ...sale, deletedInBling: Boolean(sale.blingOrderId), loyaltyWarning };
+  return { ...sale, cancelledInBling: true, loyaltyWarning };
 });
 app.post('/sales/:id/reverse-fidelizei', async (req) => {
   requireManager(req);
