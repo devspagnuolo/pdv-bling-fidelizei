@@ -152,6 +152,10 @@ function App() {
   const [emitFiscal, setEmitFiscal] = useState(false);
   const [message, setMessage] = useState('');
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const scanTimerRef = useRef<number | undefined>(undefined);
+  const scanStartedAtRef = useRef(0);
+  const scanLastAtRef = useRef(0);
+  const scanKeysRef = useRef(0);
   const apiFetch = async (url: string, init: RequestInit = {}) => {
     const response = await fetch(url, {
       ...init,
@@ -337,8 +341,8 @@ function App() {
     .filter(i => i.quantity > 0));
   const commentItem = (id: string, comment: string) => changeCart(items.map(i => i.id === id ? { ...i, comment } : i));
 
-  const searchCatalog = async () => {
-    const term = query.trim();
+  const searchCatalog = async (forcedTerm?: string) => {
+    const term = (forcedTerm ?? query).trim();
     if (!term) {
       setMessage('Digite o nome, SKU ou código de barras do produto.');
       return;
@@ -370,6 +374,27 @@ function App() {
     } finally {
       setSearchingCatalog(false);
     }
+  };
+  const handleProductInput = (value: string) => {
+    const now = performance.now();
+    const previousLength = query.length;
+    const rapid = scanLastAtRef.current > 0 && now - scanLastAtRef.current < 55;
+    if (!rapid || value.length <= previousLength) {
+      scanStartedAtRef.current = now;
+      scanKeysRef.current = 1;
+    } else {
+      scanKeysRef.current += Math.max(1, value.length - previousLength);
+    }
+    scanLastAtRef.current = now;
+    setQuery(value);
+    setCatalogSearchActive(false);
+    if (scanTimerRef.current) window.clearTimeout(scanTimerRef.current);
+    const insertedAtOnce = value.length - previousLength >= 4;
+    scanTimerRef.current = window.setTimeout(() => {
+      const elapsed = scanLastAtRef.current - scanStartedAtRef.current;
+      const scannerSpeed = scanKeysRef.current >= 4 && elapsed / Math.max(1, scanKeysRef.current - 1) < 55;
+      if (value.trim().length >= 4 && (insertedAtOnce || scannerSpeed)) void searchCatalog(value);
+    }, 85);
   };
 
   const lookup = async () => {
@@ -834,7 +859,7 @@ function App() {
         {step === 'product' && <>
           <div className="section-title"><div><small>ETAPA 1</small><h2>Adicionar produtos</h2></div><span>Busca direta no Bling</span></div>
           <div className="catalog-search">
-            <div className="search-field"><span className="scan-icon">⌁</span><input ref={searchInputRef} id="product-search" className="search" value={query} onChange={e => { setQuery(e.target.value); setCatalogSearchActive(false); }} onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); void searchCatalog(); } }} placeholder="Bipe o código de barras ou pesquise SKU / produto" autoFocus /><kbd>F2</kbd></div>
+            <div className="search-field"><span className="scan-icon">⌁</span><input ref={searchInputRef} id="product-search" className="search" value={query} onChange={e => handleProductInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); if (scanTimerRef.current) window.clearTimeout(scanTimerRef.current); void searchCatalog(); } }} placeholder="Bipe para adicionar ou digite o código e pressione Enter" autoFocus /><kbd>F2</kbd></div>
             <button className="search-action" onClick={() => void searchCatalog()} disabled={searchingCatalog}>{searchingCatalog ? 'Buscando…' : 'Buscar'}</button>
           </div>
           <p className="scanner-hint">Leitor de código de barras conectado? Basta bipar e pressionar Enter.</p>
