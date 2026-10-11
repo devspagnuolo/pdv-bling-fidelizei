@@ -42,7 +42,7 @@ type PaymentEntry = { key: string; paymentMethodId: string; amount: string; rece
 type CashAccount = { id: string; name: string; type: string; active: boolean };
 type FinancialCategory = { id: string; name: string; type: number; active: boolean; isDefault?: boolean };
 type SalesChannel = { id: string; name: string; businessUnitId?: string; businessUnitName?: string; active: boolean };
-type CashSession = { id: string; operatorId: string; sellerId: string; accountId: string; accountName: string; channelId?: string; channelName?: string; businessUnitId?: string; businessUnitName?: string; status: 'OPEN' | 'CLOSED'; openingAmount: number; openedAt: string };
+type CashSession = { id: string; operatorId: string; sellerId: string; accountId: string; accountName: string; channelId?: string; channelName?: string; businessUnitId?: string; businessUnitName?: string; status: 'OPEN' | 'CLOSED'; openingAmount: number; openedAt: string; closedAt?: string; closingSummary?: any; salesCount?: number; salesTotal?: number };
 type CashDay = {
   date: string;
   salesCount: number;
@@ -64,6 +64,7 @@ const newPaymentKey = () => globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-
 const numberValue = (value: string) => Math.max(0, Number(value.replace(',', '.')) || 0);
 const roundMoney = (value: number) => Math.round(value * 100) / 100;
 const brl = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' });
+const localDate = () => new Date().toLocaleDateString('sv-SE');
 const storeReceipt = {
   legalName: import.meta.env.VITE_STORE_LEGAL_NAME || 'VIVI MODA PLUS SIZE COMÉRCIO VAREJISTA E ACESSÓRIOS LTDA - ME',
   cnpj: import.meta.env.VITE_STORE_CNPJ || '35.405.822/0001-37',
@@ -132,8 +133,16 @@ function App() {
   const [completing, setCompleting] = useState(false);
   const [recentSales, setRecentSales] = useState<any[]>([]);
   const [orders, setOrders] = useState<any[]>([]);
+  const [ordersSummary, setOrdersSummary] = useState({ count: 0, total: 0, cancelled: 0 });
+  const [orderFrom, setOrderFrom] = useState(localDate());
+  const [orderTo, setOrderTo] = useState(localDate());
+  const [orderSearch, setOrderSearch] = useState('');
   const [pendingOperations, setPendingOperations] = useState<any>();
   const [cashControl, setCashControl] = useState<any>();
+  const [cashSessions, setCashSessions] = useState<CashSession[]>([]);
+  const [cashFrom, setCashFrom] = useState(localDate());
+  const [cashTo, setCashTo] = useState(localDate());
+  const [cashSearch, setCashSearch] = useState('');
   const [receipt, setReceipt] = useState<any>();
   const autoOutputId = useRef('');
   const [discountMode, setDiscountMode] = useState<'value' | 'percent'>('value');
@@ -614,6 +623,69 @@ function App() {
       setOperationBusy(false);
     }
   };
+  const loadOrders = async () => {
+    setOperationBusy(true);
+    try {
+      const params = new URLSearchParams({ limit: '200', from: orderFrom, to: orderTo });
+      if (orderSearch.trim()) params.set('search', orderSearch.trim());
+      const response = await apiFetch(`${api}/sales/orders?${params}`);
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.message ?? 'Não foi possível consultar os pedidos.');
+      setOrders(Array.isArray(data) ? data : data.orders ?? []);
+      setOrdersSummary(data.summary ?? { count: 0, total: 0, cancelled: 0 });
+    } catch (error) { setMessage(error instanceof Error ? error.message : 'Falha ao consultar pedidos.'); }
+    finally { setOperationBusy(false); }
+  };
+  const loadCashSessions = async () => {
+    setOperationBusy(true);
+    try {
+      const params = new URLSearchParams({ from: cashFrom, to: cashTo, limit: '200' });
+      if (cashSearch.trim()) params.set('search', cashSearch.trim());
+      const response = await apiFetch(`${api}/cash/sessions?${params}`);
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.message ?? 'Não foi possível consultar os caixas.');
+      setCashSessions(data.sessions ?? []);
+    } catch (error) { setMessage(error instanceof Error ? error.message : 'Falha ao consultar os caixas.'); }
+    finally { setOperationBusy(false); }
+  };
+  const loadCashControl = async (sessionId: string) => {
+    setOperationBusy(true);
+    try {
+      const response = await apiFetch(`${api}/cash/control?sessionId=${encodeURIComponent(sessionId)}`);
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.message ?? 'Não foi possível consultar o controle do caixa.');
+      setCashControl(data);
+    } catch (error) { setMessage(error instanceof Error ? error.message : 'Falha ao consultar o controle do caixa.'); }
+    finally { setOperationBusy(false); }
+  };
+  const reopenCash = async (session: CashSession) => {
+    if (!window.confirm('Reabrir este caixa para realizar ajustes?')) return;
+    setOperationBusy(true);
+    try {
+      const response = await apiFetch(`${api}/cash/sessions/${session.id}/reopen`, { method: 'POST' });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.message ?? 'Não foi possível reabrir o caixa.');
+      setCashSession(data.session);
+      setCashControl(undefined);
+      await loadCashSessions();
+      setMessage('Caixa reaberto. O evento ficou registrado apenas no controle interno do PDV.');
+    } catch (error) { setMessage(error instanceof Error ? error.message : 'Falha ao reabrir o caixa.'); }
+    finally { setOperationBusy(false); }
+  };
+  const deleteCash = async (session: CashSession) => {
+    if (!window.confirm('Excluir esta abertura de caixa? Apenas caixas sem vendas, sangrias ou suprimentos podem ser excluídos.')) return;
+    setOperationBusy(true);
+    try {
+      const response = await apiFetch(`${api}/cash/sessions/${session.id}`, { method: 'DELETE' });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.message ?? 'Não foi possível excluir o caixa.');
+      if (cashSession?.id === session.id) setCashSession(undefined);
+      setCashControl(undefined);
+      await loadCashSessions();
+      setMessage('Abertura de teste excluída do controle interno.');
+    } catch (error) { setMessage(error instanceof Error ? error.message : 'Falha ao excluir o caixa.'); }
+    finally { setOperationBusy(false); }
+  };
   const openOperation = (type: OperationModal) => {
     setMenuOpen(false);
     setOperationAmount('');
@@ -625,24 +697,12 @@ function App() {
     }
     if (type === 'orders') {
       setOrders([]);
-      apiFetch(`${api}/sales/orders?limit=100`).then(async response => {
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.message ?? 'Não foi possível consultar os pedidos.');
-        return data;
-      }).then(setOrders).catch(error => setMessage(error instanceof Error ? error.message : 'Falha ao consultar pedidos.'));
+      void loadOrders();
     }
     if (type === 'control') {
       setCashControl(undefined);
-      if (!cashSession) {
-        setMessage('Abra o caixa para consultar o controle.');
-        setOperationModal(undefined);
-      } else {
-        apiFetch(`${api}/cash/control?sessionId=${encodeURIComponent(cashSession.id)}`).then(async response => {
-          const data = await response.json();
-          if (!response.ok) throw new Error(data.message ?? 'Não foi possível consultar o controle do caixa.');
-          return data;
-        }).then(setCashControl).catch(error => setMessage(error instanceof Error ? error.message : 'Falha ao consultar o controle do caixa.'));
-      }
+      setCashSessions([]);
+      void loadCashSessions();
     }
     if (type === 'pending') {
       setPendingOperations(undefined);
@@ -665,9 +725,7 @@ function App() {
       if (!response.ok) throw new Error(data.message ?? 'Não foi possível abrir o caixa.');
       setCashSession(data.session);
       setOperationModal(undefined);
-      setMessage(data.openingSyncStatus === 'PENDING'
-        ? `Caixa aberto na conta ${data.session.accountName}. O saldo inicial ficou pendente de conferência no Bling.`
-        : `Caixa aberto na conta ${data.session.accountName}. Saldo inicial registrado no Bling quando informado.`);
+      setMessage(`Caixa aberto. O saldo inicial é somente operacional e não gerou movimento financeiro no Bling.`);
     } catch (error) { setMessage(error instanceof Error ? error.message : 'Falha ao abrir o caixa.'); }
     finally { setOperationBusy(false); }
   };
@@ -702,7 +760,7 @@ function App() {
       setOperationModal(undefined);
       setCashSession(undefined);
       setDayHistory(undefined);
-      setMessage('Caixa fechado após sincronizar e conferir o movimento do dia no Bling.');
+      setMessage('Caixa fechado. O saldo final permaneceu somente no controle interno e não gerou movimento financeiro no Bling.');
       await refreshCashSession();
     } catch (error) { setMessage(error instanceof Error ? error.message : 'Falha ao fechar o caixa.'); }
     finally { setOperationBusy(false); }
@@ -715,7 +773,7 @@ function App() {
       const response = await apiFetch(`${api}/sales/${encodeURIComponent(order.id)}`, { method: 'DELETE' });
       const data = await response.json();
       if (!response.ok) throw new Error(data.message ?? 'Não foi possível excluir o pedido.');
-      setOrders(current => current.map(item => item.id === order.id ? data : item));
+      await loadOrders();
       setMessage(data.loyaltyWarning ? `Pedido excluído no Bling. Atenção: ${data.loyaltyWarning}` : `Pedido ${label} excluído e estornado no Bling.`);
     } catch (error) { setMessage(error instanceof Error ? error.message : 'Falha ao excluir o pedido.'); }
     finally { setOperationBusy(false); }
@@ -735,13 +793,13 @@ function App() {
             <button disabled={!cashSession} onClick={() => openOperation('withdrawal')}><span>↘</span><div>Sangria<small>Registra débito em Caixas e Bancos</small></div></button>
             <button disabled={!cashSession} onClick={() => openOperation('supply')}><span>↗</span><div>Suprimento<small>Registra crédito em Caixas e Bancos</small></div></button>
             <button disabled={!cashSession} onClick={() => openOperation('close')}><span>□</span><div>Fechar caixa<small>Conferir o movimento do dia</small></div></button>
-            <button disabled={!cashSession} onClick={() => openOperation('control')}><span>▥</span><div>Controle de caixa<small>Vendas, pagamentos e movimentações</small></div></button>
+            <button onClick={() => openOperation('control')}><span>▥</span><div>Controle de caixa<small>Histórico, relatórios e ajustes</small></div></button>
             <button onClick={() => openOperation('orders')}><span>☷</span><div>Pedidos do PDV<small>Consultar, conferir e excluir no Bling</small></div></button>
             <button onClick={() => printReceipt()} disabled={!sale?.blingOrderId}><span>▣</span><div>Imprimir<small>Comprovante da venda atual</small></div></button>
             <button onClick={() => void reprintLast()}><span>▤</span><div>Reimprimir última operação<small>Busca a última venda concluída</small></div></button>
             <button onClick={() => openOperation('return')}><span>↩</span><div>Gerar devolução<small>Selecionar pedido e continuar no Bling</small></div></button>
             <button onClick={() => openOperation('pending')}><span>!</span><div>Pendências de sincronização<small>Vendas, caixa e webhooks que exigem atenção</small></div></button>
-            <div className="menu-routing"><b>{cashSession ? `Caixa aberto · ${cashSession.accountName}` : 'Caixa fechado'}</b><small>Movimentos financeiros são enviados ao Bling. Nenhuma operação é simulada.</small></div>
+            <div className="menu-routing"><b>{cashSession ? `Caixa aberto · ${cashSession.accountName}` : 'Caixa fechado'}</b><small>Somente vendas, sangrias e suprimentos geram registros financeiros. Troco inicial e fechamento são controles internos.</small></div>
           </div>}
         </div>
         <button className="new-sale-button" onClick={newSale}>＋ Nova venda</button>
@@ -972,8 +1030,29 @@ function App() {
           <button className="finish" disabled={operationBusy || numberValue(operationAmount) <= 0} onClick={() => void registerCashOperation(operationModal === 'withdrawal' ? 'WITHDRAWAL' : 'SUPPLY')}>{operationBusy ? 'Registrando no Bling…' : `Registrar ${operationModal === 'withdrawal' ? 'sangria' : 'suprimento'} no Bling`}</button>
         </div>}
         {operationModal === 'control' && <div className="closing-review cash-control">
-          {!cashControl ? <div className="empty-state">Carregando o controle do caixa…</div> : <>
-            <div className="operation-account"><span>{cashControl.session.channelName ?? 'Loja do Bling'} · {cashControl.session.businessUnitName ?? 'Unidade de negócio'}</span><b>{cashControl.session.accountName}</b></div>
+          {!cashControl ? <>
+            <div className="report-filters">
+              <label>Início<input type="date" value={cashFrom} onChange={event => setCashFrom(event.target.value)} /></label>
+              <label>Fim<input type="date" value={cashTo} onChange={event => setCashTo(event.target.value)} /></label>
+              <label>Operador ou loja<input value={cashSearch} placeholder="Pesquisar" onChange={event => setCashSearch(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') void loadCashSessions(); }} /></label>
+              <button className="finish" disabled={operationBusy} onClick={() => void loadCashSessions()}>Filtrar caixas</button>
+            </div>
+            <div className="cash-session-table">
+              <div className="table-head"><span>Loja</span><span>Operador</span><span>Abertura</span><span>Vendas</span><span>Total</span><span>Situação</span><span>Ações</span></div>
+              {cashSessions.map(session => <div className="table-row" key={session.id}>
+                <button className="row-link" onClick={() => void loadCashControl(session.id)}>{session.channelName ?? 'Configuração padrão'}</button>
+                <span>{sellers.find(item => item.id === session.sellerId)?.name ?? session.operatorId}</span>
+                <span>{new Date(session.openedAt).toLocaleString('pt-BR')}</span>
+                <span>{session.salesCount ?? 0}</span>
+                <b>{brl.format(session.salesTotal ?? 0)}</b>
+                <span className={session.status === 'OPEN' ? 'status-open' : 'status-closed'}>{session.status === 'OPEN' ? 'Aberto' : 'Fechado'}</span>
+                <span className="row-actions"><button onClick={() => void loadCashControl(session.id)}>Relatório</button>{session.status === 'CLOSED' && <button onClick={() => void reopenCash(session)}>Reabrir</button>}<button className="danger-action" onClick={() => void deleteCash(session)}>Excluir</button></span>
+              </div>)}
+              {!cashSessions.length && <div className="empty-state compact">{operationBusy ? 'Carregando caixas…' : 'Nenhum caixa encontrado no período.'}</div>}
+            </div>
+          </> : <>
+            <div className="report-toolbar"><button className="secondary" onClick={() => setCashControl(undefined)}>← Voltar aos caixas</button><span className={cashControl.session.status === 'OPEN' ? 'status-open' : 'status-closed'}>{cashControl.session.status === 'OPEN' ? 'Caixa aberto' : 'Caixa fechado'}</span>{cashControl.session.status === 'CLOSED' && <button onClick={() => void reopenCash(cashControl.session)}>Reabrir caixa</button>}<button className="danger-action" onClick={() => void deleteCash(cashControl.session)}>Excluir caixa</button></div>
+            <div className="operation-account"><span>{cashControl.session.channelName ?? 'Loja do Bling'} · {cashControl.session.businessUnitName ?? 'Unidade de negócio'}<small>Abertura: {new Date(cashControl.session.openedAt).toLocaleString('pt-BR')}{cashControl.session.closedAt ? ` · Fechamento: ${new Date(cashControl.session.closedAt).toLocaleString('pt-BR')}` : ''}</small></span><b>{sellers.find(item => item.id === cashControl.session.sellerId)?.name ?? cashControl.session.operatorId}</b></div>
             <div className="closing-summary">
               <div><small>Saldo inicial</small><b>{brl.format(cashControl.session.openingAmount)}</b></div>
               <div><small>Vendas</small><b>{cashControl.salesCount}</b></div>
@@ -981,12 +1060,18 @@ function App() {
               <div><small>Dinheiro esperado</small><b>{brl.format(cashControl.expectedCash)}</b></div>
             </div>
             {cashControl.pendingSales > 0 && <p className="inline-warning">{cashControl.pendingSales} venda(s) aguardando sincronização.</p>}
-            <h3>Recebimentos por forma de pagamento</h3>
-            <div className="bling-history">{cashControl.paymentTotals.length ? cashControl.paymentTotals.map((item: any) => <div key={item.name}><span>{item.name}</span><b>{brl.format(item.amount)}</b></div>) : <div className="empty-state compact">Nenhuma venda registrada.</div>}</div>
+            <h3>Formas de pagamento</h3>
+            <div className="report-table"><div className="table-head"><span>Nome</span><span>Total registrado</span><span>Total informado</span><span>Diferença</span></div>{cashControl.paymentTotals.map((item: any) => {
+              const reconciled = cashControl.session.closingSummary?.reconciliation?.find((entry: any) => entry.name === item.name);
+              return <div className="table-row" key={item.name}><b>{item.name}</b><span>{brl.format(item.amount)}</span><span>{reconciled ? brl.format(reconciled.counted) : '—'}</span><span className={reconciled?.difference ? 'difference' : ''}>{reconciled ? brl.format(reconciled.difference) : '—'}</span></div>;
+            })}</div>
             <h3>Vendas desta abertura</h3>
-            <div className="bling-history">{cashControl.sales.length ? cashControl.sales.map((item: any) => <div key={item.id}><span>Pedido {item.orderNumber ?? item.orderId ?? item.id.slice(0, 8)}<small>{new Date(item.createdAt).toLocaleString('pt-BR')}</small></span><b>{brl.format(item.total)}</b></div>) : <div className="empty-state compact">Nenhuma venda registrada.</div>}</div>
-            <h3>Movimentações do caixa</h3>
-            <div className="bling-history">{cashControl.operations.length ? cashControl.operations.map((item: any) => <div key={item.id}><span>{item.type === 'OPENING' ? 'Abertura' : item.type === 'WITHDRAWAL' ? 'Sangria' : item.type === 'SUPPLY' ? 'Suprimento' : item.type === 'CLOSING' ? 'Fechamento' : item.type}<small>{new Date(item.createdAt).toLocaleString('pt-BR')}</small></span><b className={item.type === 'WITHDRAWAL' ? 'debit' : 'credit'}>{item.type === 'WITHDRAWAL' ? '−' : '+'} {brl.format(item.amount)}</b></div>) : <div className="empty-state compact">Sem movimentações.</div>}</div>
+            <div className="report-table"><div className="table-head"><span>Pedido</span><span>Cliente</span><span>Data</span><span>Desconto</span><span>Total</span></div>{cashControl.sales.map((item: any) => <div className="table-row" key={item.id}><b>{item.orderNumber ?? item.orderId ?? item.id.slice(0, 8)}</b><span>{item.customerName}</span><span>{new Date(item.createdAt).toLocaleString('pt-BR')}</span><span>{brl.format(item.discount ?? 0)}</span><b>{brl.format(item.total)}</b></div>)}</div>
+            {cashControl.discountsTotal > 0 && <><h3>Descontos concedidos</h3><div className="bling-history">{cashControl.sales.filter((item: any) => item.discount > 0).map((item: any) => <div key={item.id}><span>Pedido {item.orderNumber ?? item.orderId}<small>{item.customerName}</small></span><b>− {brl.format(item.discount)}</b></div>)}<div><strong>Total</strong><strong>− {brl.format(cashControl.discountsTotal)}</strong></div></div></>}
+            <h3>Sangrias e suprimentos</h3>
+            <div className="bling-history">{cashControl.operations.filter((item: any) => ['WITHDRAWAL','SUPPLY'].includes(item.type)).map((item: any) => <div key={item.id}><span>{item.type === 'WITHDRAWAL' ? 'Sangria' : 'Suprimento'}<small>{new Date(item.createdAt).toLocaleString('pt-BR')} · {item.data?.notes ?? 'Sem observação'}</small></span><b className={item.type === 'WITHDRAWAL' ? 'debit' : 'credit'}>{item.type === 'WITHDRAWAL' ? '−' : '+'} {brl.format(item.amount)}</b></div>)}</div>
+            <h3>Histórico operacional</h3>
+            <div className="bling-history">{cashControl.operations.map((item: any) => <div key={item.id}><span>{item.type === 'OPENING' ? 'Abertura' : item.type === 'REOPENING' ? 'Reabertura' : item.type === 'WITHDRAWAL' ? 'Sangria' : item.type === 'SUPPLY' ? 'Suprimento' : item.type === 'CLOSING' ? 'Fechamento' : item.type}<small>{new Date(item.createdAt).toLocaleString('pt-BR')}</small></span><b>{['OPENING','CLOSING','REOPENING'].includes(item.type) ? 'Controle interno' : brl.format(item.amount)}</b></div>)}</div>
           </>}
         </div>}
         {operationModal === 'close' && <div className="closing-review">
@@ -1010,12 +1095,13 @@ function App() {
             <div className="dialog-actions"><button className="secondary" onClick={() => setOperationModal(undefined)}>Cancelar</button><button className="finish" disabled={operationBusy} onClick={() => void closeCash()}>{operationBusy ? 'Sincronizando…' : 'Confirmar fechamento'}</button></div>
           </>}
         </div>}
-        {operationModal === 'orders' && <div className="return-list order-management">
-          <p>Pedidos gerados neste PDV. A exclusão estorna contas e estoque e remove o pedido correspondente no Bling.</p>
-          {orders.length ? orders.map(item => <div key={item.id}>
-            <span><b>Pedido {item.blingOrderNumber ?? item.blingOrderId ?? item.id.slice(0, 8)}</b><small>{new Date(item.createdAt).toLocaleString('pt-BR')} · {brl.format(item.total)}</small><small>{item.status}{item.categoryName ? ` · ${item.categoryName}` : ''}{item.lastError ? ` · ${item.lastError}` : ''}</small></span>
-            <button className="danger-action" disabled={operationBusy || item.status === 'CANCELLED' || item.status === 'PROCESSING'} onClick={() => void cancelOrder(item)}>{item.status === 'CANCELLED' ? 'Excluído' : 'Excluir no Bling'}</button>
-          </div>) : <div className="empty-state compact">Nenhum pedido registrado neste PDV.</div>}
+        {operationModal === 'orders' && <div className="closing-review order-management">
+          <p className="muted">Pedidos gerados neste PDV. A exclusão estorna contas e estoque e remove o pedido correspondente no Bling.</p>
+          <div className="report-filters"><label>Início<input type="date" value={orderFrom} onChange={event => setOrderFrom(event.target.value)} /></label><label>Fim<input type="date" value={orderTo} onChange={event => setOrderTo(event.target.value)} /></label><label>Cliente, CPF ou pedido<input value={orderSearch} placeholder="Pesquisar" onChange={event => setOrderSearch(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') void loadOrders(); }} /></label><button className="finish" disabled={operationBusy} onClick={() => void loadOrders()}>Filtrar pedidos</button></div>
+          <div className="closing-summary order-summary"><div><small>Pedidos no período</small><b>{ordersSummary.count}</b></div><div><small>Total vendido</small><b>{brl.format(ordersSummary.total)}</b></div><div><small>Excluídos</small><b>{ordersSummary.cancelled}</b></div></div>
+          <div className="order-table"><div className="table-head"><span>Número</span><span>Data</span><span>Cliente</span><span>Total</span><span>Situação</span><span>Ações</span></div>{orders.map(item => <div className="table-row" key={item.id}>
+            <b>{item.blingOrderNumber ?? item.blingOrderId ?? item.id.slice(0, 8)}</b><span>{new Date(item.createdAt).toLocaleString('pt-BR')}</span><span>{item.customer?.name ?? 'Consumidor Final'}<small>{item.customer?.cpf ?? ''}</small></span><b>{brl.format(item.total)}</b><span className={item.status === 'CANCELLED' ? 'status-cancelled' : 'status-open'}>{item.status === 'CANCELLED' ? 'Excluído' : item.status === 'COMPLETED' ? 'Atendido' : item.status}</span><button className="danger-action" disabled={operationBusy || item.status === 'CANCELLED' || item.status === 'PROCESSING'} onClick={() => void cancelOrder(item)}>{item.status === 'CANCELLED' ? 'Excluído' : 'Excluir no Bling'}</button>
+          </div>)}{!orders.length && <div className="empty-state compact">{operationBusy ? 'Consultando pedidos…' : 'Nenhum pedido encontrado no período.'}</div>}</div>
         </div>}
         {operationModal === 'pending' && <div className="return-list pending-list">
           {!pendingOperations ? <div className="empty-state">Consultando pendências…</div> : <>
