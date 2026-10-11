@@ -281,6 +281,10 @@ kbd { padding: 3px 7px; border: 1px solid #d4ddd7; border-bottom-width: 2px; bor
 .fiscal-check span { display: grid; gap: 3px; }
 .fiscal-check small { letter-spacing: 0; }
 .inline-warning { color: #875b00; background: #fff3cf; border-radius: 8px; padding: 9px 11px; font-size: 12px; }
+.order-action-error { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 16px; margin: 12px 0; border: 1px solid #e5a3a3; border-radius: 12px; color: #8f1d1d; background: #fff1f1; }
+.order-action-error div { display: grid; gap: 4px; }
+.order-action-error span { font-size: 13px; line-height: 1.45; }
+.order-action-error button { flex: 0 0 auto; }
 .cart-product-info { display: grid; gap: 3px; min-width: 0; }
 .item-comment { width: min(300px, 100%); border: 0; border-bottom: 1px dashed #c5d1c8; background: transparent; padding: 5px 0; color: #526158; font-size: 11px; }
 .item-comment:focus { outline: none; border-bottom-color: #2e9f5b; }
