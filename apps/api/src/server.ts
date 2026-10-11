@@ -887,7 +887,7 @@ app.delete('/sales/:id', async (req) => {
   if (!sale) return badRequest('Pedido não encontrado no PDV');
   if (sale.status === 'DELETED') return { ...sale, idempotent: true };
   if (sale.status === 'CANCELLED') return badRequest('Pedido cancelado não pode ser excluído por este fluxo');
-  if (sale.blingOrderId) await bling.deleteOrder(sale.blingOrderId);
+  const deletion = sale.blingOrderId ? await bling.deleteOrder(sale.blingOrderId) : { deleted: false, warnings: [] as string[] };
   let loyaltyWarning: string | undefined;
   if (sale.fidelizeiTransactionId) {
     try { await fidelizei.reverseSale(sale.id); }
@@ -903,9 +903,9 @@ app.delete('/sales/:id', async (req) => {
   }
   sale.status = 'DELETED';
   Object.assign(sale, { deletedAt: new Date().toISOString(), deletionKind: 'DELETED' });
-  sale.lastError = loyaltyWarning;
+  sale.lastError = [loyaltyWarning, ...(deletion.warnings ?? [])].filter(Boolean).join(' · ') || undefined;
   await persist(sale);
-  return { ...sale, deletedInBling: Boolean(sale.blingOrderId), loyaltyWarning };
+  return { ...sale, deletedInBling: Boolean(sale.blingOrderId), loyaltyWarning, blingWarnings: deletion.warnings };
 });
 app.post('/sales/:id/cancel', async (req) => {
   const id = (req.params as { id: string }).id;
@@ -914,7 +914,7 @@ app.post('/sales/:id/cancel', async (req) => {
   if (sale.status === 'CANCELLED') return { ...sale, idempotent: true };
   if (sale.status === 'DELETED') return badRequest('Pedido excluído não pode ser cancelado');
   if (!sale.blingOrderId) return badRequest('Pedido ainda não foi criado no Bling');
-  await bling.cancelOrder(sale.blingOrderId);
+  const cancellation = await bling.cancelOrder(sale.blingOrderId);
   let loyaltyWarning: string | undefined;
   if (sale.fidelizeiTransactionId) {
     try { await fidelizei.reverseSale(sale.id); }
@@ -930,9 +930,9 @@ app.post('/sales/:id/cancel', async (req) => {
   }
   sale.status = 'CANCELLED';
   sale.cancelledAt = new Date().toISOString();
-  Object.assign(sale, { cancellationKind: 'CANCELLED', lastError: loyaltyWarning });
+  Object.assign(sale, { cancellationKind: 'CANCELLED', lastError: [loyaltyWarning, ...(cancellation.warnings ?? [])].filter(Boolean).join(' · ') || undefined });
   await persist(sale);
-  return { ...sale, cancelledInBling: true, loyaltyWarning };
+  return { ...sale, cancelledInBling: true, loyaltyWarning, blingWarnings: cancellation.warnings };
 });
 app.post('/sales/:id/reverse-fidelizei', async (req) => {
   requireManager(req);
