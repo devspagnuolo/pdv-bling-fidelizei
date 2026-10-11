@@ -138,6 +138,7 @@ function App() {
   const [orderTo, setOrderTo] = useState(localDate());
   const [orderSearch, setOrderSearch] = useState('');
   const [orderScope, setOrderScope] = useState<'all' | 'active' | 'deleted' | 'cancelled'>('active');
+  const [orderActionError, setOrderActionError] = useState('');
   const [pendingOperations, setPendingOperations] = useState<any>();
   const [cashControl, setCashControl] = useState<any>();
   const [cashSessions, setCashSessions] = useState<CashSession[]>([]);
@@ -723,6 +724,7 @@ function App() {
     }
     if (type === 'orders') {
       setOrders([]);
+      setOrderActionError('');
       void loadOrders();
     }
     if (type === 'control') {
@@ -795,6 +797,7 @@ function App() {
     const label = order.blingOrderNumber ?? order.blingOrderId ?? order.id.slice(0, 8);
     if (!window.confirm(`Excluir o pedido ${label}? A operação estornará contas e estoque e será refletida no Bling.`)) return;
     setOperationBusy(true);
+    setOrderActionError('');
     try {
       const response = await apiFetch(`${api}/sales/${encodeURIComponent(order.id)}`, { method: 'DELETE' });
       const data = await response.json();
@@ -802,13 +805,18 @@ function App() {
       await loadOrders();
       const warnings = [...(data.blingWarnings ?? []), ...(data.loyaltyWarning ? [data.loyaltyWarning] : [])];
       setMessage(warnings.length ? `Pedido ${label} excluído. Conferir: ${warnings.join(' · ')}` : `Pedido ${label} excluído do Bling e retirado dos pedidos ativos do PDV.`);
-    } catch (error) { setMessage(error instanceof Error ? error.message : 'Falha ao excluir o pedido.'); }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : 'Falha ao excluir o pedido.';
+      setOrderActionError(detail);
+      setMessage(detail);
+    }
     finally { setOperationBusy(false); }
   };
   const cancelOrder = async (order: any) => {
     const label = order.blingOrderNumber ?? order.blingOrderId ?? order.id.slice(0, 8);
     if (!window.confirm(`Cancelar o pedido ${label}? Contas e estoque serão estornados e o pedido ficará como Cancelado no Bling e no PDV.`)) return;
     setOperationBusy(true);
+    setOrderActionError('');
     try {
       const response = await apiFetch(`${api}/sales/${encodeURIComponent(order.id)}/cancel`, { method: 'POST' });
       const data = await response.json();
@@ -816,7 +824,11 @@ function App() {
       await loadOrders();
       const warnings = [...(data.blingWarnings ?? []), ...(data.loyaltyWarning ? [data.loyaltyWarning] : [])];
       setMessage(warnings.length ? `Pedido ${label} cancelado. Conferir: ${warnings.join(' · ')}` : `Pedido ${label} cancelado no Bling e no PDV.`);
-    } catch (error) { setMessage(error instanceof Error ? error.message : 'Falha ao cancelar o pedido.'); }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : 'Falha ao cancelar o pedido.';
+      setOrderActionError(detail);
+      setMessage(detail);
+    }
     finally { setOperationBusy(false); }
   };
 
@@ -1138,6 +1150,7 @@ function App() {
         </div>}
         {operationModal === 'orders' && <div className="closing-review order-management">
           <p className="muted">Pedidos gerados neste PDV. A exclusão estorna contas e estoque e remove o pedido correspondente no Bling.</p>
+          {orderActionError && <div className="order-action-error" role="alert"><div><b>A operação não foi concluída</b><span>{orderActionError}</span></div>{/permiss|escopo|autoriz/i.test(orderActionError) && <button className="secondary" onClick={() => { window.location.href = `${api}/integrations/bling/connect`; }}>Reconectar Bling</button>}</div>}
           <div className="order-scope-tabs" role="tablist"><button className={orderScope === 'active' ? 'active' : ''} onClick={() => { setOrderScope('active'); void loadOrders('active'); }}>Ativos</button><button className={orderScope === 'deleted' ? 'active' : ''} onClick={() => { setOrderScope('deleted'); void loadOrders('deleted'); }}>Excluídos</button><button className={orderScope === 'cancelled' ? 'active' : ''} onClick={() => { setOrderScope('cancelled'); void loadOrders('cancelled'); }}>Cancelados</button><button className={orderScope === 'all' ? 'active' : ''} onClick={() => { setOrderScope('all'); void loadOrders('all'); }}>Todos</button></div>
           <div className="report-filters order-filters"><label>Início<input type="date" value={orderFrom} onChange={event => setOrderFrom(event.target.value)} /></label><label>Fim<input type="date" value={orderTo} onChange={event => setOrderTo(event.target.value)} /></label><label>Cliente, CPF ou pedido<input value={orderSearch} placeholder="Pesquisar" onChange={event => setOrderSearch(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') void loadOrders(); }} /></label><button className="finish" disabled={operationBusy} onClick={() => void loadOrders()}>Filtrar pedidos</button></div>
           <div className="closing-summary order-summary"><div><small>Pedidos ativos</small><b>{ordersSummary.count}</b></div><div><small>Total ativo</small><b>{brl.format(ordersSummary.total)}</b></div><div><small>Excluídos</small><b>{ordersSummary.deleted}</b></div><div><small>Cancelados</small><b>{ordersSummary.cancelled}</b></div></div>
