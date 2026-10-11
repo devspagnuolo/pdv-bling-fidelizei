@@ -544,21 +544,6 @@ export const fidelizei = {
     };
     return { coupon, reservationId: `consumed:${coupon.code}`, expiresAt: new Date().toISOString() };
   },
-  registerSale: async (input: { externalSaleId: string; orderNumber: string; customerCpf?: string; total: number; occurredAt: string }) => {
-    const response = await fidelizeiFetch('/sales', {
-      method: 'POST',
-      body: JSON.stringify({
-        externalSaleId: input.externalSaleId,
-        orderNumber: input.orderNumber,
-        customerCpf: input.customerCpf?.replace(/\D/g, '') || undefined,
-        totalCents: Math.round(input.total * 100),
-        occurredAt: input.occurredAt
-      })
-    });
-    if (!response.ok) return fidelizeiError(response, 'registro da venda');
-    const data = unwrap(await response.json()) as Record<string, unknown>;
-    return { transactionId: textValue(data.id ?? data.externalId) ?? input.externalSaleId, idempotent: data.idempotent === true };
-  },
   reverseSale: async (externalSaleId: string) => {
     const response = await fidelizeiFetch(`/sales/${encodeURIComponent(externalSaleId)}/reverse`, { method: 'POST' });
     if (!response.ok) return fidelizeiError(response, 'estorno da venda');
