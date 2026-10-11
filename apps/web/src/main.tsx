@@ -133,10 +133,11 @@ function App() {
   const [completing, setCompleting] = useState(false);
   const [recentSales, setRecentSales] = useState<any[]>([]);
   const [orders, setOrders] = useState<any[]>([]);
-  const [ordersSummary, setOrdersSummary] = useState({ count: 0, total: 0, cancelled: 0 });
+  const [ordersSummary, setOrdersSummary] = useState({ count: 0, total: 0, cancelled: 0, deleted: 0 });
   const [orderFrom, setOrderFrom] = useState(localDate());
   const [orderTo, setOrderTo] = useState(localDate());
   const [orderSearch, setOrderSearch] = useState('');
+  const [orderScope, setOrderScope] = useState<'all' | 'active' | 'deleted' | 'cancelled'>('active');
   const [pendingOperations, setPendingOperations] = useState<any>();
   const [cashControl, setCashControl] = useState<any>();
   const [cashSessions, setCashSessions] = useState<CashSession[]>([]);
@@ -648,16 +649,16 @@ function App() {
       setOperationBusy(false);
     }
   };
-  const loadOrders = async () => {
+  const loadOrders = async (scope = orderScope) => {
     setOperationBusy(true);
     try {
-      const params = new URLSearchParams({ limit: '200', from: orderFrom, to: orderTo });
+      const params = new URLSearchParams({ limit: '200', from: orderFrom, to: orderTo, scope });
       if (orderSearch.trim()) params.set('search', orderSearch.trim());
       const response = await apiFetch(`${api}/sales/orders?${params}`);
       const data = await response.json();
       if (!response.ok) throw new Error(data.message ?? 'Não foi possível consultar os pedidos.');
       setOrders(Array.isArray(data) ? data : data.orders ?? []);
-      setOrdersSummary(data.summary ?? { count: 0, total: 0, cancelled: 0 });
+      setOrdersSummary(data.summary ?? { count: 0, total: 0, cancelled: 0, deleted: 0 });
     } catch (error) { setMessage(error instanceof Error ? error.message : 'Falha ao consultar pedidos.'); }
     finally { setOperationBusy(false); }
   };
@@ -790,7 +791,7 @@ function App() {
     } catch (error) { setMessage(error instanceof Error ? error.message : 'Falha ao fechar o caixa.'); }
     finally { setOperationBusy(false); }
   };
-  const cancelOrder = async (order: any) => {
+  const deleteOrder = async (order: any) => {
     const label = order.blingOrderNumber ?? order.blingOrderId ?? order.id.slice(0, 8);
     if (!window.confirm(`Excluir o pedido ${label}? A operação estornará contas e estoque e será refletida no Bling.`)) return;
     setOperationBusy(true);
@@ -801,6 +802,19 @@ function App() {
       await loadOrders();
       setMessage(data.loyaltyWarning ? `Pedido excluído no Bling. Atenção: ${data.loyaltyWarning}` : `Pedido ${label} excluído e estornado no Bling.`);
     } catch (error) { setMessage(error instanceof Error ? error.message : 'Falha ao excluir o pedido.'); }
+    finally { setOperationBusy(false); }
+  };
+  const cancelOrder = async (order: any) => {
+    const label = order.blingOrderNumber ?? order.blingOrderId ?? order.id.slice(0, 8);
+    if (!window.confirm(`Cancelar o pedido ${label}? Contas e estoque serão estornados e o pedido ficará como Cancelado no Bling e no PDV.`)) return;
+    setOperationBusy(true);
+    try {
+      const response = await apiFetch(`${api}/sales/${encodeURIComponent(order.id)}/cancel`, { method: 'POST' });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.message ?? 'Não foi possível cancelar o pedido.');
+      await loadOrders();
+      setMessage(data.loyaltyWarning ? `Pedido cancelado. Atenção: ${data.loyaltyWarning}` : `Pedido ${label} cancelado no Bling e no PDV.`);
+    } catch (error) { setMessage(error instanceof Error ? error.message : 'Falha ao cancelar o pedido.'); }
     finally { setOperationBusy(false); }
   };
 
@@ -1122,10 +1136,11 @@ function App() {
         </div>}
         {operationModal === 'orders' && <div className="closing-review order-management">
           <p className="muted">Pedidos gerados neste PDV. A exclusão estorna contas e estoque e remove o pedido correspondente no Bling.</p>
-          <div className="report-filters"><label>Início<input type="date" value={orderFrom} onChange={event => setOrderFrom(event.target.value)} /></label><label>Fim<input type="date" value={orderTo} onChange={event => setOrderTo(event.target.value)} /></label><label>Cliente, CPF ou pedido<input value={orderSearch} placeholder="Pesquisar" onChange={event => setOrderSearch(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') void loadOrders(); }} /></label><button className="finish" disabled={operationBusy} onClick={() => void loadOrders()}>Filtrar pedidos</button></div>
-          <div className="closing-summary order-summary"><div><small>Pedidos no período</small><b>{ordersSummary.count}</b></div><div><small>Total vendido</small><b>{brl.format(ordersSummary.total)}</b></div><div><small>Excluídos</small><b>{ordersSummary.cancelled}</b></div></div>
+          <div className="order-scope-tabs" role="tablist"><button className={orderScope === 'active' ? 'active' : ''} onClick={() => { setOrderScope('active'); void loadOrders('active'); }}>Ativos</button><button className={orderScope === 'deleted' ? 'active' : ''} onClick={() => { setOrderScope('deleted'); void loadOrders('deleted'); }}>Excluídos</button><button className={orderScope === 'cancelled' ? 'active' : ''} onClick={() => { setOrderScope('cancelled'); void loadOrders('cancelled'); }}>Cancelados</button><button className={orderScope === 'all' ? 'active' : ''} onClick={() => { setOrderScope('all'); void loadOrders('all'); }}>Todos</button></div>
+          <div className="report-filters order-filters"><label>Início<input type="date" value={orderFrom} onChange={event => setOrderFrom(event.target.value)} /></label><label>Fim<input type="date" value={orderTo} onChange={event => setOrderTo(event.target.value)} /></label><label>Cliente, CPF ou pedido<input value={orderSearch} placeholder="Pesquisar" onChange={event => setOrderSearch(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') void loadOrders(); }} /></label><button className="finish" disabled={operationBusy} onClick={() => void loadOrders()}>Filtrar pedidos</button></div>
+          <div className="closing-summary order-summary"><div><small>Pedidos ativos</small><b>{ordersSummary.count}</b></div><div><small>Total ativo</small><b>{brl.format(ordersSummary.total)}</b></div><div><small>Excluídos</small><b>{ordersSummary.deleted}</b></div><div><small>Cancelados</small><b>{ordersSummary.cancelled}</b></div></div>
           <div className="order-table"><div className="table-head"><span>Número</span><span>Data</span><span>Cliente</span><span>Total</span><span>Situação</span><span>Ações</span></div>{orders.map(item => <div className="table-row" key={item.id}>
-            <b>{item.blingOrderNumber ?? item.blingOrderId ?? item.id.slice(0, 8)}</b><span>{new Date(item.createdAt).toLocaleString('pt-BR')}</span><span>{item.customer?.name ?? 'Consumidor Final'}<small>{item.customer?.cpf ?? ''}</small></span><b>{brl.format(item.total)}</b><span className={item.status === 'CANCELLED' ? 'status-cancelled' : 'status-open'}>{item.status === 'CANCELLED' ? 'Excluído' : item.status === 'COMPLETED' ? 'Atendido' : item.status}</span><button className="danger-action" disabled={operationBusy || item.status === 'CANCELLED' || item.status === 'PROCESSING'} onClick={() => void cancelOrder(item)}>{item.status === 'CANCELLED' ? 'Excluído' : 'Excluir no Bling'}</button>
+            <b>{item.blingOrderNumber ?? item.blingOrderId ?? item.id.slice(0, 8)}</b><span>{new Date(item.createdAt).toLocaleString('pt-BR')}</span><span>{item.customer?.name ?? 'Consumidor Final'}<small>{item.customer?.cpf ?? ''}</small></span><b>{brl.format(item.total)}</b><span className={item.status === 'DELETED' || item.status === 'CANCELLED' ? 'status-cancelled' : 'status-open'}>{item.status === 'DELETED' ? 'Excluído' : item.status === 'CANCELLED' ? 'Cancelado' : item.status === 'COMPLETED' ? 'Atendido' : item.status}</span><span className="order-row-actions">{!['DELETED','CANCELLED','PROCESSING'].includes(item.status) && <><button className="cancel-action" disabled={operationBusy} onClick={() => void cancelOrder(item)}>Cancelar</button><button className="danger-action" disabled={operationBusy} onClick={() => void deleteOrder(item)}>Excluir</button></>}</span>
           </div>)}{!orders.length && <div className="empty-state compact">{operationBusy ? 'Consultando pedidos…' : 'Nenhum pedido encontrado no período.'}</div>}</div>
         </div>}
         {operationModal === 'pending' && <div className="return-list pending-list">
