@@ -800,7 +800,8 @@ function App() {
       const data = await response.json();
       if (!response.ok) throw new Error(data.message ?? 'Não foi possível excluir o pedido.');
       await loadOrders();
-      setMessage(data.loyaltyWarning ? `Pedido excluído no Bling. Atenção: ${data.loyaltyWarning}` : `Pedido ${label} excluído e estornado no Bling.`);
+      const warnings = [...(data.blingWarnings ?? []), ...(data.loyaltyWarning ? [data.loyaltyWarning] : [])];
+      setMessage(warnings.length ? `Pedido ${label} excluído. Conferir: ${warnings.join(' · ')}` : `Pedido ${label} excluído do Bling e retirado dos pedidos ativos do PDV.`);
     } catch (error) { setMessage(error instanceof Error ? error.message : 'Falha ao excluir o pedido.'); }
     finally { setOperationBusy(false); }
   };
@@ -813,7 +814,8 @@ function App() {
       const data = await response.json();
       if (!response.ok) throw new Error(data.message ?? 'Não foi possível cancelar o pedido.');
       await loadOrders();
-      setMessage(data.loyaltyWarning ? `Pedido cancelado. Atenção: ${data.loyaltyWarning}` : `Pedido ${label} cancelado no Bling e no PDV.`);
+      const warnings = [...(data.blingWarnings ?? []), ...(data.loyaltyWarning ? [data.loyaltyWarning] : [])];
+      setMessage(warnings.length ? `Pedido ${label} cancelado. Conferir: ${warnings.join(' · ')}` : `Pedido ${label} cancelado no Bling e no PDV.`);
     } catch (error) { setMessage(error instanceof Error ? error.message : 'Falha ao cancelar o pedido.'); }
     finally { setOperationBusy(false); }
   };
