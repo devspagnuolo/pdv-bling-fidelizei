@@ -326,6 +326,17 @@ const acceptOrderAction = async (response: Response, operation: string) => {
   if (response.status === 409 && /já|ja|lançad|lancad|atendid/i.test(detail)) return;
   throw new Error(`Bling: ${operation} falhou (HTTP ${response.status})${detail ? `: ${detail.slice(0, 500)}` : ''}`);
 };
+const rejectOrderReversal = async (response: Response, operation: string): Promise<never> => {
+  const detail = await response.text();
+  if (response.status === 403 && /insufficient_scope|higher privileges|escopo|permiss/i.test(detail)) {
+    throw Object.assign(new Error(
+      `O Bling não autorizou ${operation}. Libere no aplicativo Bling as permissões de escrita para Pedidos de venda, Estoque e Contas a receber e reconecte a integração. O pedido permaneceu ativo para proteger o financeiro e o estoque.`
+    ), { statusCode: 403, code: 'BLING_INSUFFICIENT_SCOPE' });
+  }
+  throw Object.assign(new Error(
+    `Bling: ${operation} falhou (HTTP ${response.status})${detail ? `: ${detail.slice(0, 500)}` : ''}`
+  ), { statusCode: response.status >= 400 && response.status < 500 ? response.status : 502 });
+};
 const finalizeOrder = async (orderId: string) => {
   await acceptOrderAction(await blingRequest(`/pedidos/vendas/${encodeURIComponent(orderId)}/lancar-estoque`, { method: 'POST' }), 'lançamento de estoque');
   await acceptOrderAction(await blingRequest(`/pedidos/vendas/${encodeURIComponent(orderId)}/lancar-contas`, { method: 'POST' }), 'lançamento de contas');
@@ -333,30 +344,24 @@ const finalizeOrder = async (orderId: string) => {
   await acceptOrderAction(await blingRequest(`/pedidos/vendas/${encodeURIComponent(orderId)}/situacoes/${encodeURIComponent(statusId)}`, { method: 'PATCH' }), 'alteração do pedido para Atendido');
   return { stockPosted: true, accountsPosted: true, attended: true, statusId };
 };
-const deleteOrder = async (orderId: string, skipReversalBecauseStockWasNotPosted = false) => {
+const deleteOrder = async (orderId: string) => {
   const warnings: string[] = [];
-  if (!skipReversalBecauseStockWasNotPosted) {
-    for (const action of ['estornar-contas', 'estornar-estoque']) {
-      const actionResponse = await blingRequest(`/pedidos/vendas/${encodeURIComponent(orderId)}/${action}`, { method: 'POST' });
-      if (!actionResponse.ok && ![204, 404, 409].includes(actionResponse.status)) {
-        const detail = await actionResponse.text();
-        throw new Error(`Bling: ${action === 'estornar-contas' ? 'estorno das contas' : 'estorno do estoque'} falhou (HTTP ${actionResponse.status})${detail ? `: ${detail.slice(0, 500)}` : ''}`);
-      }
+  for (const action of ['estornar-contas', 'estornar-estoque']) {
+    const actionResponse = await blingRequest(`/pedidos/vendas/${encodeURIComponent(orderId)}/${action}`, { method: 'POST' });
+    if (!actionResponse.ok && ![204, 404, 409].includes(actionResponse.status)) {
+      await rejectOrderReversal(actionResponse, action === 'estornar-contas' ? 'o estorno das contas a receber' : 'o estorno do estoque');
     }
   }
   const response = await blingRequest(`/pedidos/vendas/${encodeURIComponent(orderId)}`, { method: 'DELETE' });
   if (!response.ok && response.status !== 204 && response.status !== 404) return blingFailure(response, 'exclusão do pedido');
   return { deleted: true, warnings };
 };
-const cancelOrder = async (orderId: string, skipReversalBecauseStockWasNotPosted = false) => {
+const cancelOrder = async (orderId: string) => {
   const warnings: string[] = [];
-  if (!skipReversalBecauseStockWasNotPosted) {
-    for (const action of ['estornar-contas', 'estornar-estoque']) {
-      const response = await blingRequest(`/pedidos/vendas/${encodeURIComponent(orderId)}/${action}`, { method: 'POST' });
-      if (!response.ok && ![204, 404, 409].includes(response.status)) {
-        const detail = await response.text();
-        throw new Error(`Bling: cancelamento falhou ao ${action} (HTTP ${response.status})${detail ? `: ${detail.slice(0, 500)}` : ''}`);
-      }
+  for (const action of ['estornar-contas', 'estornar-estoque']) {
+    const response = await blingRequest(`/pedidos/vendas/${encodeURIComponent(orderId)}/${action}`, { method: 'POST' });
+    if (!response.ok && ![204, 404, 409].includes(response.status)) {
+      await rejectOrderReversal(response, action === 'estornar-contas' ? 'o estorno das contas a receber' : 'o estorno do estoque');
     }
   }
   const statusId = await findCancelledStatusId();
