@@ -255,6 +255,10 @@ kbd { padding: 3px 7px; border: 1px solid #d4ddd7; border-bottom-width: 2px; bor
 .enrollment-box input { margin: 0; background: #fff; }
 .enrollment-box button { border: 0; border-radius: 9px; padding: 10px 12px; background: #168c4d; color: #fff; font-weight: 800; }
 .enrollment-box button:disabled { opacity: .4; cursor: not-allowed; }
+.customer-registration{display:grid;gap:14px;margin-top:14px;padding:18px;border:1px solid #e7c75d;border-radius:14px;background:linear-gradient(135deg,#fffdf7,#fff8df)}
+.customer-registration h3{margin:3px 0 4px}.customer-registration p{margin:0;color:var(--muted);font-size:13px}.customer-registration>div>small{font-weight:800;color:#9a6800;letter-spacing:.06em}
+.customer-registration-grid{display:grid;grid-template-columns:1.4fr 1fr 1.2fr auto;gap:10px;align-items:end}.customer-registration-grid label{display:grid;gap:6px}.customer-registration-grid input{margin:0}.customer-registration-grid button{min-height:46px;white-space:nowrap}
+@media(max-width:900px){.customer-registration-grid{grid-template-columns:1fr 1fr}.customer-registration-grid button{grid-column:1/-1}}
 .consent-check { display: flex; align-items: flex-start; gap: 9px; margin: 0; font-size: 11px; line-height: 1.4; font-weight: 600; color: #4e5e54; }
 .consent-check input { width: 16px; height: 16px; flex: 0 0 auto; margin-top: 1px; }
 

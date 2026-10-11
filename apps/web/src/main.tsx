@@ -106,6 +106,10 @@ function App() {
   const [cpf, setCpf] = useState('');
   const [fidelizeiPhone, setFidelizeiPhone] = useState('');
   const [programConsent, setProgramConsent] = useState(false);
+  const [customerName, setCustomerName] = useState('');
+  const [customerPhone, setCustomerPhone] = useState('');
+  const [customerEmail, setCustomerEmail] = useState('');
+  const [customerSaving, setCustomerSaving] = useState(false);
   const [customer, setCustomer] = useState<CustomerLookup>();
   const [coupon, setCoupon] = useState('');
   const [sale, setSale] = useState<any>();
@@ -336,6 +340,19 @@ function App() {
       const response = await apiFetch(`${api}/catalog/products?query=${encodeURIComponent(term)}`);
       const data = await response.json();
       if (!response.ok) throw new Error(data.message ?? 'Não foi possível consultar os produtos.');
+      const normalized = term.toLowerCase();
+      const exact = (data as Product[]).find(product =>
+        product.sku.toLowerCase() === normalized || product.barcode?.toLowerCase() === normalized
+      );
+      if (exact) {
+        add(exact);
+        setQuery('');
+        setProducts([]);
+        setCatalogSearchActive(false);
+        setMessage(`${exact.name} adicionado ao carrinho.`);
+        window.setTimeout(() => searchInputRef.current?.focus(), 0);
+        return;
+      }
       setProducts(data);
       setCatalogSearchActive(true);
       if (!data.length) setMessage('Nenhum produto encontrado no Bling.');
@@ -353,6 +370,9 @@ function App() {
     const data = await r.json().catch(() => undefined);
     if (!r.ok) return setMessage(data?.message ?? 'Não foi possível consultar o cliente.');
     setCustomer(data);
+    setCustomerName(data.name ?? '');
+    setCustomerPhone(data.bling?.phone ?? '');
+    setCustomerEmail(data.bling?.email ?? '');
     if (data.bling?.phone) setFidelizeiPhone(data.bling.phone);
     if (!data.found) {
       const unavailable = Object.values(data.systems).includes('UNAVAILABLE');
@@ -373,6 +393,9 @@ function App() {
     setCpf('');
     setFidelizeiPhone('');
     setProgramConsent(false);
+    setCustomerName('');
+    setCustomerPhone('');
+    setCustomerEmail('');
     setCustomer(undefined);
     setCoupon('');
     setSale(undefined);
@@ -408,6 +431,26 @@ function App() {
     await lookup();
     setProgramConsent(false);
     setMessage('Adesão ao Fidelizei registrada com consentimento.');
+  };
+  const registerBlingCustomer = async () => {
+    if (!customerName.trim() || cpf.replace(/\D/g, '').length !== 11) return setMessage('Informe nome e CPF válido para cadastrar no Bling.');
+    setCustomerSaving(true);
+    setMessage('');
+    try {
+      const response = await apiFetch(`${api}/customers/bling`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: customerName, cpf, phone: customerPhone, email: customerEmail })
+      });
+      const data = await response.json().catch(() => undefined);
+      if (!response.ok) throw new Error(data?.message ?? 'Não foi possível cadastrar o cliente no Bling.');
+      await lookup();
+      setMessage(data.idempotent ? 'Cliente já estava cadastrado no Bling.' : 'Cliente cadastrado no Bling e vinculado à venda.');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Falha ao cadastrar o cliente no Bling.');
+    } finally {
+      setCustomerSaving(false);
+    }
   };
 
   const create = async () => {
@@ -479,7 +522,7 @@ function App() {
       if (!r.ok) return setMessage(data.message ?? 'Não foi possível concluir a venda.');
       const completionMessage = data.status === 'COMPLETED'
         ? `Venda concluída. Pedido Bling nº ${data.blingOrderNumber ?? data.blingOrderId}${data.fiscalStatus === 'REQUESTED' ? data.fiscalDocumentUrl ? ' · Documento fiscal aberto para impressão.' : ' · NFC-e solicitada; aguarde a autorização no Bling para imprimir o documento fiscal.' : data.fiscalStatus === 'FAILED' ? ' · Pedido salvo, mas a NFC-e precisa ser verificada no Bling.' : ' · Impressão do comprovante não fiscal aberta.'}`
-        : 'Pedido criado; a fidelidade exige reconciliação automática.';
+        : 'Pedido criado; estoque, financeiro ou situação no Bling exigem conferência.';
       if (emitFiscal && data.fiscalDocumentUrl && fiscalPrintWindow) fiscalPrintWindow.location.replace(data.fiscalDocumentUrl);
       else if (emitFiscal) fiscalPrintWindow?.close();
       newSale();
@@ -779,7 +822,16 @@ function App() {
                 </div>}
               </>}
             </div>
-          </div> : customer ? <div className="empty-state">Cliente não localizado. Continue como Consumidor Final ou revise o CPF.</div> : null}
+          </div> : customer ? <div className="empty-state">Cliente não localizado. Cadastre no Bling abaixo ou continue como Consumidor Final.</div> : null}
+          {customer && !customer.bling && customer.systems.bling !== 'UNAVAILABLE' && <section className="customer-registration">
+            <div><small>CADASTRO RÁPIDO</small><h3>Cadastrar cliente no Bling</h3><p>O cliente ficará disponível no Bling e será vinculado ao pedido desta venda.</p></div>
+            <div className="customer-registration-grid">
+              <label>Nome completo<input value={customerName} onChange={event => setCustomerName(event.target.value)} placeholder="Nome da cliente" /></label>
+              <label>Celular<input value={customerPhone} onChange={event => setCustomerPhone(event.target.value)} placeholder="DDD + número" /></label>
+              <label>E-mail<input value={customerEmail} onChange={event => setCustomerEmail(event.target.value)} placeholder="Opcional" type="email" /></label>
+              <button className="finish" disabled={customerSaving || !customerName.trim()} onClick={() => void registerBlingCustomer()}>{customerSaving ? 'Salvando no Bling…' : 'Cadastrar no Bling'}</button>
+            </div>
+          </section>}
           <label>Cupom Fidelizei<div className="row"><input disabled={!loyaltyCustomer} value={coupon} onChange={e => setCoupon(e.target.value.toUpperCase())} placeholder={loyaltyCustomer ? 'Digite o código do cupom' : 'Disponível para clientes Fidelizei'} /><button disabled={!loyaltyCustomer || !coupon} onClick={applyCoupon}>Aplicar cupom</button></div></label>
           <div className="nav-actions"><button className="secondary" onClick={() => setStep('product')}>Voltar</button><button className="next" disabled={!items.length} onClick={() => setStep('payment')}>{customer?.found ? 'Continuar para pagamento' : 'Continuar como Consumidor Final'}</button></div>
         </>}

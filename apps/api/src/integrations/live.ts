@@ -182,6 +182,27 @@ const findBlingCustomer = async (cpf: string): Promise<BlingCustomer | undefined
   if (!id || !name) return undefined;
   return { id, cpf: document, name, email: textValue(raw.email), phone: textValue(raw.celular ?? raw.telefone) };
 };
+const createBlingCustomer = async (input: { name: string; cpf: string; phone?: string; email?: string }) => {
+  const cpf = input.cpf.replace(/\D/g, '');
+  const existing = await findBlingCustomer(cpf);
+  if (existing) return { ...existing, idempotent: true };
+  const payload = {
+    nome: input.name.trim(),
+    situacao: 'A',
+    numeroDocumento: cpf,
+    tipo: 'F',
+    indicadorIe: 9,
+    celular: input.phone?.replace(/\D/g, '') || undefined,
+    email: input.email?.trim() || undefined
+  };
+  const response = await blingRequest('/contatos', { method: 'POST', body: JSON.stringify(payload) });
+  const body = await response.json().catch(() => ({})) as { data?: { id?: string | number }; message?: string; error?: unknown };
+  if (!response.ok || !body.data?.id) {
+    const detail = body.message ?? (body.error ? JSON.stringify(body.error) : JSON.stringify(body));
+    throw new Error(`Bling não cadastrou o cliente (HTTP ${response.status})${detail ? `: ${detail.slice(0, 700)}` : ''}`);
+  }
+  return { id: String(body.data.id), cpf, name: payload.nome, phone: input.phone, email: input.email, idempotent: false };
+};
 let finalConsumerCache: { expires: number; id: string } | undefined;
 const findFinalConsumerId = async () => {
   if (finalConsumerCache && finalConsumerCache.expires > Date.now()) return finalConsumerCache.id;
@@ -477,7 +498,7 @@ export const getFidelizeiConnectionStatus = async () => {
   }
 };
 
-export const bling = { products: searchProducts, syncProducts, sellers: fetchSellers, paymentMethods: fetchPayments, financialCategories: fetchFinancialCategories, salesChannels: fetchSalesChannels, financialAccounts: fetchFinancialAccounts, cashEntries: fetchCashEntries, createCashEntry, findCustomer: findBlingCustomer, createOrder, finalizeOrder, deleteOrder, generateNfce, getFiscalCapability };
+export const bling = { products: searchProducts, syncProducts, sellers: fetchSellers, paymentMethods: fetchPayments, financialCategories: fetchFinancialCategories, salesChannels: fetchSalesChannels, financialAccounts: fetchFinancialAccounts, cashEntries: fetchCashEntries, createCashEntry, findCustomer: findBlingCustomer, createCustomer: createBlingCustomer, createOrder, finalizeOrder, deleteOrder, generateNfce, getFiscalCapability };
 export const fidelizei = {
   findCustomer: async (cpf: string) => {
     const normalized = cpf.replace(/\D/g, '');

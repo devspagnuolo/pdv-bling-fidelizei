@@ -546,6 +546,13 @@ app.get('/operations/pending', async (req) => {
 });
 
 app.get('/customers/:cpf', async (req) => lookupCustomer((req.params as { cpf: string }).cpf));
+app.post('/customers/bling', async (req) => {
+  const body = req.body as { name?: string; cpf?: string; phone?: string; email?: string };
+  const cpf = body.cpf?.replace(/\D/g, '') ?? '';
+  if (!body.name?.trim() || cpf.length !== 11) return badRequest('Nome e CPF válido são obrigatórios para cadastrar no Bling');
+  if (body.email && !/^\S+@\S+\.\S+$/.test(body.email.trim())) return badRequest('Informe um e-mail válido ou deixe o campo vazio');
+  return bling.createCustomer({ name: body.name.trim().slice(0, 120), cpf, phone: body.phone?.trim(), email: body.email?.trim() });
+});
 app.post('/customers/fidelizei', async (req) => {
   const body = req.body as { name: string; cpf: string; phone?: string; email?: string; programConsent: boolean };
   if (!body.name || !body.cpf || body.programConsent !== true) return badRequest('Nome, CPF e consentimento explícito são obrigatórios para adesão');
@@ -764,25 +771,9 @@ app.post('/sales/:id/complete', async (req) => {
         app.log.error({ error, saleId: sale.id, blingOrderId: order.id }, 'Pedido criado, mas a NFC-e não foi gerada no Bling');
       }
     }
-    if (!sale.customer?.cpf) {
-      sale.status = 'COMPLETED';
-    } else {
-      try {
-        const tx = await fidelizei.registerSale({
-          externalSaleId: sale.id,
-          orderNumber: order.number ?? order.id,
-          customerCpf: sale.customer.cpf,
-          total: sale.total,
-          occurredAt: new Date().toISOString()
-        });
-        sale.status = 'COMPLETED';
-        sale.fidelizeiTransactionId = tx.transactionId;
-      } catch (error) {
-        sale.status = 'RECONCILIATION_REQUIRED';
-        sale.lastError = error instanceof Error ? error.message.slice(0, 500) : 'Falha no Fidelizei';
-        app.log.warn({ error, saleId: sale.id }, 'Venda criada no Bling e pendente no Fidelizei');
-      }
-    }
+    // O Fidelizei credita os pontos ao processar o pedido do Bling. O PDV somente
+    // consulta a cliente e valida/consome cupons, evitando pontuação duplicada.
+    sale.status = 'COMPLETED';
     if (fulfillmentError) {
       sale.status = 'RECONCILIATION_REQUIRED';
       sale.lastError = [sale.lastError, fulfillmentError].filter(Boolean).join(' · ').slice(0, 500);
