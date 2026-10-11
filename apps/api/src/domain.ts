@@ -38,7 +38,7 @@ export type SaleItem = { productId: string; sku: string; name: string; quantity:
 export type PaymentSplit = { paymentMethodId: string; paymentMethodName?: string; amount: number; receivedAmount?: number; change?: number };
 export type Sale = {
   id: string;
-  status: 'OPEN' | 'PROCESSING' | 'COMPLETED' | 'SYNC_FAILED' | 'RECONCILIATION_REQUIRED' | 'CANCELLED';
+  status: 'OPEN' | 'PROCESSING' | 'COMPLETED' | 'SYNC_FAILED' | 'RECONCILIATION_REQUIRED' | 'CANCELLED' | 'DELETED';
   operatorId: string;
   sellerId: string;
   categoryId?: string;
