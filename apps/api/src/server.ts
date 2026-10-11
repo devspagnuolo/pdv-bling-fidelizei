@@ -827,6 +827,9 @@ app.get('/sales/recent', async (req) => {
 });
 app.get('/sales/orders', async (req) => {
   const query = req.query as { limit?: string; from?: string; to?: string; search?: string; status?: string; scope?: 'all' | 'active' | 'deleted' | 'cancelled' };
+  const normalizeLegacyStatus = (item: Sale) => item.status === 'CANCELLED' && !(item as Sale & { cancellationKind?: string }).cancellationKind
+    ? Object.assign({}, item, { status: 'DELETED' as const, deletionKind: 'LEGACY_DELETE' })
+    : item;
   const rawLimit = Number(query.limit ?? 100);
   const limit = Math.max(1, Math.min(200, Number.isFinite(rawLimit) ? rawLimit : 100));
   if (pool) {
@@ -837,8 +840,8 @@ app.get('/sales/orders', async (req) => {
     if (query.to) filters.push(`(data->>'createdAt')::timestamptz < (${add(`${query.to}T00:00:00-03:00`)}::timestamptz + interval '1 day')`);
     if (query.status) filters.push(`status = ${add(query.status)}`);
     if (query.scope === 'active') filters.push(`status not in ('CANCELLED','DELETED')`);
-    if (query.scope === 'deleted') filters.push(`status = 'DELETED'`);
-    if (query.scope === 'cancelled') filters.push(`status = 'CANCELLED'`);
+    if (query.scope === 'deleted') filters.push(`(status = 'DELETED' or (status='CANCELLED' and coalesce(data->>'cancellationKind','')=''))`);
+    if (query.scope === 'cancelled') filters.push(`status = 'CANCELLED' and data->>'cancellationKind'='CANCELLED'`);
     if (query.search?.trim()) {
       const term = add(`%${query.search.trim()}%`);
       filters.push(`(coalesce(data->>'blingOrderNumber','') ilike ${term}
@@ -853,7 +856,7 @@ app.get('/sales/orders', async (req) => {
       `select data from pdv_sales ${where} order by (data->>'createdAt')::timestamptz desc limit $${values.length}`,
       values
     ) as { rows: { data: Sale }[] };
-    const orders = result.rows.map(row => row.data);
+    const orders = result.rows.map(row => normalizeLegacyStatus(row.data));
     const active = orders.filter(item => !['CANCELLED','DELETED'].includes(item.status));
     return {
       orders,
@@ -865,7 +868,7 @@ app.get('/sales/orders', async (req) => {
       }
     };
   }
-  const orders = [...sales.values()]
+  const orders = [...sales.values()].map(normalizeLegacyStatus)
     .filter(item => !query.from || item.createdAt.slice(0, 10) >= query.from)
     .filter(item => !query.to || item.createdAt.slice(0, 10) <= query.to)
     .filter(item => !query.status || item.status === query.status)
