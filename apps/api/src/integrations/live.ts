@@ -284,6 +284,7 @@ const fetchFinancialCategories = async () => {
 };
 
 let attendedStatusCache: { expires: number; id: string } | undefined;
+let cancelledStatusCache: { expires: number; id: string } | undefined;
 const findAttendedStatusId = async () => {
   const configured = process.env.BLING_ATTENDED_STATUS_ID?.trim();
   if (configured) return configured;
@@ -299,6 +300,23 @@ const findAttendedStatusId = async () => {
   const id = attended ? textValue(attended.id) : undefined;
   if (!id) throw new Error('Crie ou disponibilize a situação Atendido para pedidos de venda no Bling');
   attendedStatusCache = { expires: Date.now() + 10 * 60_000, id };
+  return id;
+};
+const findCancelledStatusId = async () => {
+  const configured = process.env.BLING_CANCELLED_STATUS_ID?.trim();
+  if (configured) return configured;
+  if (cancelledStatusCache && cancelledStatusCache.expires > Date.now()) return cancelledStatusCache.id;
+  const modulesResponse = await blingRequest('/situacoes/modulos');
+  if (!modulesResponse.ok) return blingFailure(modulesResponse, 'consulta dos módulos de situação');
+  const module = records(await modulesResponse.json()).find(row => /pedid.*venda|venda/i.test(`${textValue(row.nome) ?? ''} ${textValue(row.descricao) ?? ''}`));
+  const moduleId = module ? textValue(module.id) : undefined;
+  if (!moduleId) throw new Error('Bling não retornou o módulo de pedidos de venda');
+  const situationsResponse = await blingRequest(`/situacoes/modulos/${encodeURIComponent(moduleId)}`);
+  if (!situationsResponse.ok) return blingFailure(situationsResponse, 'consulta das situações de pedido');
+  const cancelled = records(await situationsResponse.json()).find(row => /^cancelad[oa]$/i.test((textValue(row.nome) ?? '').trim()));
+  const id = cancelled ? textValue(cancelled.id) : undefined;
+  if (!id) throw new Error('Crie ou disponibilize a situação Cancelado para pedidos de venda no Bling');
+  cancelledStatusCache = { expires: Date.now() + 10 * 60_000, id };
   return id;
 };
 
@@ -326,6 +344,18 @@ const deleteOrder = async (orderId: string) => {
   const response = await blingRequest(`/pedidos/vendas/${encodeURIComponent(orderId)}`, { method: 'DELETE' });
   if (!response.ok && response.status !== 204 && response.status !== 404) return blingFailure(response, 'exclusão do pedido');
   return { deleted: true };
+};
+const cancelOrder = async (orderId: string) => {
+  for (const action of ['estornar-contas', 'estornar-estoque']) {
+    const response = await blingRequest(`/pedidos/vendas/${encodeURIComponent(orderId)}/${action}`, { method: 'POST' });
+    if (!response.ok && ![204, 404, 409].includes(response.status)) {
+      const detail = await response.text();
+      throw new Error(`Bling: cancelamento falhou ao ${action} (HTTP ${response.status})${detail ? `: ${detail.slice(0, 500)}` : ''}`);
+    }
+  }
+  const statusId = await findCancelledStatusId();
+  await acceptOrderAction(await blingRequest(`/pedidos/vendas/${encodeURIComponent(orderId)}/situacoes/${encodeURIComponent(statusId)}`, { method: 'PATCH' }), 'alteração do pedido para Cancelado');
+  return { cancelled: true, statusId };
 };
 const generateNfce = async (orderId: string) => {
   const response = await blingRequest(`/pedidos/vendas/${encodeURIComponent(orderId)}/gerar-nfce`, { method: 'POST' });
@@ -498,7 +528,7 @@ export const getFidelizeiConnectionStatus = async () => {
   }
 };
 
-export const bling = { products: searchProducts, syncProducts, sellers: fetchSellers, paymentMethods: fetchPayments, financialCategories: fetchFinancialCategories, salesChannels: fetchSalesChannels, financialAccounts: fetchFinancialAccounts, cashEntries: fetchCashEntries, createCashEntry, findCustomer: findBlingCustomer, createCustomer: createBlingCustomer, createOrder, finalizeOrder, deleteOrder, generateNfce, getFiscalCapability };
+export const bling = { products: searchProducts, syncProducts, sellers: fetchSellers, paymentMethods: fetchPayments, financialCategories: fetchFinancialCategories, salesChannels: fetchSalesChannels, financialAccounts: fetchFinancialAccounts, cashEntries: fetchCashEntries, createCashEntry, findCustomer: findBlingCustomer, createCustomer: createBlingCustomer, createOrder, finalizeOrder, cancelOrder, deleteOrder, generateNfce, getFiscalCapability };
 export const fidelizei = {
   findCustomer: async (cpf: string) => {
     const normalized = cpf.replace(/\D/g, '');
