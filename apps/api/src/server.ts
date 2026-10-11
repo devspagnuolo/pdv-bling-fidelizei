@@ -108,47 +108,6 @@ const getSale = async (id: string) => {
   if (sale) sales.set(sale.id, sale);
   return sale;
 };
-const reconcileFidelizeiSale = async (sale: Sale) => {
-  if (sale.status !== 'RECONCILIATION_REQUIRED' || !sale.blingOrderId) return;
-  try {
-    const tx = await fidelizei.registerSale({
-      externalSaleId: sale.id,
-      orderNumber: sale.blingOrderId,
-      customerCpf: sale.customer?.cpf,
-      total: sale.total,
-      occurredAt: sale.createdAt
-    });
-    Object.assign(sale, { status: 'COMPLETED', fidelizeiTransactionId: tx.transactionId });
-    await persist(sale);
-    app.log.info({ saleId: sale.id }, 'Venda reconciliada com o Fidelizei');
-  } catch (error) {
-    const attempts = Number((sale as Sale & { reconciliationAttempts?: number }).reconciliationAttempts ?? 0) + 1;
-    const dead = attempts >= 10;
-    const nextAttempt = new Date(Date.now() + Math.min(60 * 60_000, 30_000 * 2 ** Math.min(attempts, 7))).toISOString();
-    Object.assign(sale, {
-      lastError: error instanceof Error ? error.message.slice(0, 500) : 'Falha desconhecida no Fidelizei',
-      reconciliationAttempts: attempts,
-      nextReconciliationAt: nextAttempt,
-      reconciliationDead: dead
-    });
-    await persist(sale);
-    app.log.warn({ error, saleId: sale.id, attempts, dead }, 'Fidelizei indisponível; venda continuará pendente');
-  }
-};
-const reconcilePendingSales = async () => {
-  if (!pool) return;
-  const result = await pool.query(
-    `select data from pdv_sales
-     where status = 'RECONCILIATION_REQUIRED'
-       and coalesce((data->>'reconciliationDead')::boolean, false) = false
-       and coalesce((data->>'nextReconciliationAt')::timestamptz, now()) <= now()
-     order by updated_at asc limit 50`
-  ) as { rows: { data: Sale }[] };
-  for (const row of result.rows) await reconcileFidelizeiSale(row.data);
-};
-setInterval(() => void reconcilePendingSales().catch(error => app.log.error(error, 'Falha na rotina de reconciliação Fidelizei')), 60_000).unref();
-void reconcilePendingSales().catch(error => app.log.error(error, 'Falha na reconciliação inicial Fidelizei'));
-
 app.get('/', async () => ({ ok: true, service: 'pdv-bling-fidelizei-api' }));
 app.get('/health', async (_req, reply) => {
   let database = false;
@@ -324,6 +283,41 @@ app.get('/cash/configuration', async () => {
   const [accounts, channels] = await Promise.all([bling.financialAccounts(), bling.salesChannels()]);
   return { accounts, channels };
 });
+app.get('/cash/sessions', async (req) => {
+  const query = req.query as { from?: string; to?: string; status?: string; search?: string; limit?: string };
+  const database = requireDatabase();
+  const values: unknown[] = [];
+  const filters: string[] = [];
+  const add = (value: unknown) => { values.push(value); return `$${values.length}`; };
+  if (query.from) filters.push(`(session.opened_at at time zone 'America/Sao_Paulo')::date >= ${add(query.from)}::date`);
+  if (query.to) filters.push(`(session.opened_at at time zone 'America/Sao_Paulo')::date <= ${add(query.to)}::date`);
+  if (query.status && ['OPEN', 'CLOSED'].includes(query.status)) filters.push(`session.status = ${add(query.status)}`);
+  if (query.search?.trim()) {
+    const term = add(`%${query.search.trim()}%`);
+    filters.push(`(session.operator_id ilike ${term} or coalesce(session.channel_name,'') ilike ${term} or session.account_name ilike ${term})`);
+  }
+  const limit = Math.max(1, Math.min(300, Number(query.limit) || 100));
+  values.push(limit);
+  const result = await database.query(
+    `select session.id, session.operator_id as "operatorId", session.seller_id as "sellerId",
+      session.account_id as "accountId", session.account_name as "accountName",
+      session.channel_id as "channelId", session.channel_name as "channelName",
+      session.business_unit_id as "businessUnitId", session.business_unit_name as "businessUnitName",
+      session.status, session.opening_amount::float8 as "openingAmount", session.opened_at as "openedAt",
+      session.closed_at as "closedAt", session.closing_summary as "closingSummary",
+      coalesce(stats.sales_count,0)::int as "salesCount", coalesce(stats.sales_total,0)::float8 as "salesTotal"
+     from pdv_cash_sessions session
+     left join lateral (
+       select count(*) as sales_count, coalesce(sum((sale.data->>'total')::numeric),0) as sales_total
+       from pdv_sales sale where sale.data->>'cashSessionId'=session.id::text
+         and sale.status in ('COMPLETED','RECONCILIATION_REQUIRED')
+     ) stats on true
+     ${filters.length ? `where ${filters.join(' and ')}` : ''}
+     order by session.opened_at desc limit $${values.length}`,
+    values
+  ) as { rows: any[] };
+  return { sessions: result.rows, count: result.rows.length };
+});
 app.get('/cash/sessions/current', async (req) => {
   const operatorId = principalFromRequest(req)?.operatorId ?? String((req.query as { operatorId?: string }).operatorId ?? '');
   if (!operatorId) return badRequest('Informe o operador do caixa');
@@ -346,9 +340,8 @@ app.post('/cash/sessions/open', async (req) => {
   const businessUnitName = useDefaultRouting ? 'Configuração padrão' : channel.businessUnitName ?? 'Unidade do Bling';
   const openingAmount = money(Math.max(0, Number(body.openingAmount) || 0));
   const sessionId = randomUUID();
-  const operationId = randomUUID();
   const database = requireDatabase();
-  let openingSyncStatus: 'NOT_REQUIRED' | 'SYNCED' | 'PENDING' = 'NOT_REQUIRED';
+  const operationId = randomUUID();
   await database.query(
     `insert into pdv_cash_sessions (id, operator_id, seller_id, account_id, account_name, channel_id, channel_name,
        business_unit_id, business_unit_name, status, opening_amount)
@@ -359,31 +352,9 @@ app.post('/cash/sessions/open', async (req) => {
   await database.query(
     `insert into pdv_cash_operations (id, session_id, operation_type, amount, data)
      values ($1,$2,'OPENING',$3,$4::jsonb)`,
-    [operationId, sessionId, openingAmount, JSON.stringify({ account, syncStatus: openingAmount > 0 ? 'PENDING' : 'NOT_REQUIRED' })]
+    [operationId, sessionId, openingAmount, JSON.stringify({ account, syncStatus: 'NOT_REQUIRED', controlOnly: true })]
   );
-  if (openingAmount > 0) {
-    try {
-      const entry = await bling.createCashEntry({
-        type: 'OPENING', amount: openingAmount, accountId: account.id,
-        notes: `Abertura de caixa PDV ${operationId}`, date: todayInSaoPaulo()
-      });
-      await database.query(
-        `update pdv_cash_operations set bling_entry_id=$2,
-          data=data || '{"syncStatus":"SYNCED"}'::jsonb where id=$1`,
-        [operationId, entry.id ?? null]
-      );
-      openingSyncStatus = 'SYNCED';
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Falha desconhecida';
-      await database.query(
-        `update pdv_cash_operations set data=data || $2::jsonb where id=$1`,
-        [operationId, JSON.stringify({ syncStatus: 'FAILED', lastError: message.slice(0, 500) })]
-      );
-      openingSyncStatus = 'PENDING';
-      app.log.error({ error, operationId, sessionId }, 'Abertura registrada localmente, mas pendente no Bling');
-    }
-  }
-  return { session: await currentCashSession(operatorId), openingSyncStatus };
+  return { session: await currentCashSession(operatorId), openingSyncStatus: 'NOT_REQUIRED', controlOnly: true };
 });
 app.post('/cash/entries', async (req) => {
   const body = req.body as { operationId?: string; sessionId?: string; type?: 'WITHDRAWAL' | 'SUPPLY'; amount?: number; notes?: string };
@@ -450,6 +421,9 @@ app.get('/cash/control', async (req) => {
     orderNumber: row.data.blingOrderNumber,
     createdAt: row.data.createdAt,
     total: row.data.total,
+    subtotal: row.data.subtotal,
+    discount: row.data.discount ?? 0,
+    customerName: row.data.customer?.name ?? 'Consumidor Final',
     status: row.data.status,
     payments: row.data.payments ?? []
   }));
@@ -458,11 +432,57 @@ app.get('/cash/control', async (req) => {
     sales,
     salesCount: sales.length,
     salesTotal: money(sales.reduce((sum: number, sale: { total: number }) => sum + sale.total, 0)),
+    discountsTotal: money(sales.reduce((sum: number, sale: { discount?: number }) => sum + (sale.discount ?? 0), 0)),
     paymentTotals: snapshot.paymentTotals,
     operations: snapshot.operations,
     expectedCash: snapshot.expectedCash,
     pendingSales: snapshot.pendingSales
   };
+});
+app.post('/cash/sessions/:id/reopen', async (req) => {
+  const id = (req.params as { id: string }).id;
+  const database = requireDatabase();
+  const session = await cashSessionById(id);
+  if (!session) return badRequest('Caixa não encontrado');
+  if (session.status === 'OPEN') return { reopened: true, session, idempotent: true };
+  if (await currentCashSession(session.operatorId)) return badRequest('O operador já possui outro caixa aberto');
+  await database.query('begin');
+  try {
+    await database.query(`update pdv_cash_sessions set status='OPEN', closed_at=null, closing_summary=null where id=$1`, [id]);
+    await database.query(
+      `insert into pdv_cash_operations (id, session_id, operation_type, amount, data)
+       values ($1,$2,'REOPENING',0,$3::jsonb)`,
+      [randomUUID(), id, JSON.stringify({ syncStatus: 'NOT_REQUIRED', controlOnly: true })]
+    );
+    await database.query('commit');
+  } catch (error) {
+    await database.query('rollback');
+    throw error;
+  }
+  return { reopened: true, session: await cashSessionById(id) };
+});
+app.delete('/cash/sessions/:id', async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const database = requireDatabase();
+  const session = await cashSessionById(id);
+  if (!session) return reply.code(404).send({ message: 'Caixa não encontrado' });
+  const [salesResult, movementResult] = await Promise.all([
+    database.query(`select count(*)::int as count from pdv_sales where data->>'cashSessionId'=$1 and status <> 'CANCELLED'`, [id]) as Promise<{ rows: { count: number }[] }>,
+    database.query(`select count(*)::int as count from pdv_cash_operations where session_id=$1 and operation_type in ('WITHDRAWAL','SUPPLY')`, [id]) as Promise<{ rows: { count: number }[] }>
+  ]);
+  if ((salesResult.rows[0]?.count ?? 0) > 0 || (movementResult.rows[0]?.count ?? 0) > 0) {
+    return reply.code(409).send({ message: 'Este caixa possui vendas, sangrias ou suprimentos. Exclua apenas aberturas de teste sem movimento.' });
+  }
+  await database.query('begin');
+  try {
+    await database.query('delete from pdv_cash_operations where session_id=$1', [id]);
+    await database.query('delete from pdv_cash_sessions where id=$1', [id]);
+    await database.query('commit');
+  } catch (error) {
+    await database.query('rollback');
+    throw error;
+  }
+  return { deleted: true, sessionId: id };
 });
 app.post('/cash/sessions/:id/close', async (req) => {
   const id = (req.params as { id: string }).id;
@@ -806,13 +826,49 @@ app.get('/sales/recent', async (req) => {
     .slice(0, limit);
 });
 app.get('/sales/orders', async (req) => {
-  const rawLimit = Number((req.query as { limit?: string }).limit ?? 100);
+  const query = req.query as { limit?: string; from?: string; to?: string; search?: string; status?: string };
+  const rawLimit = Number(query.limit ?? 100);
   const limit = Math.max(1, Math.min(200, Number.isFinite(rawLimit) ? rawLimit : 100));
   if (pool) {
-    const result = await pool.query('select data from pdv_sales order by updated_at desc limit $1', [limit]) as { rows: { data: Sale }[] };
-    return result.rows.map(row => row.data);
+    const values: unknown[] = [];
+    const filters: string[] = [];
+    const add = (value: unknown) => { values.push(value); return `$${values.length}`; };
+    if (query.from) filters.push(`(data->>'createdAt')::timestamptz >= ${add(`${query.from}T00:00:00-03:00`)}::timestamptz`);
+    if (query.to) filters.push(`(data->>'createdAt')::timestamptz < (${add(`${query.to}T00:00:00-03:00`)}::timestamptz + interval '1 day')`);
+    if (query.status) filters.push(`status = ${add(query.status)}`);
+    if (query.search?.trim()) {
+      const term = add(`%${query.search.trim()}%`);
+      filters.push(`(coalesce(data->>'blingOrderNumber','') ilike ${term}
+        or coalesce(data->>'blingOrderId','') ilike ${term}
+        or coalesce(data#>>'{customer,name}','') ilike ${term}
+        or coalesce(data#>>'{customer,cpf}','') ilike ${term}
+        or coalesce(data#>>'{customer,email}','') ilike ${term})`);
+    }
+    const where = filters.length ? `where ${filters.join(' and ')}` : '';
+    values.push(limit);
+    const result = await pool.query(
+      `select data from pdv_sales ${where} order by (data->>'createdAt')::timestamptz desc limit $${values.length}`,
+      values
+    ) as { rows: { data: Sale }[] };
+    const orders = result.rows.map(row => row.data);
+    const active = orders.filter(item => item.status !== 'CANCELLED');
+    return {
+      orders,
+      summary: {
+        count: active.length,
+        total: money(active.reduce((sum, item) => sum + item.total, 0)),
+        cancelled: orders.length - active.length
+      }
+    };
   }
-  return [...sales.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, limit);
+  const orders = [...sales.values()]
+    .filter(item => !query.from || item.createdAt.slice(0, 10) >= query.from)
+    .filter(item => !query.to || item.createdAt.slice(0, 10) <= query.to)
+    .filter(item => !query.status || item.status === query.status)
+    .filter(item => !query.search || JSON.stringify(item).toLowerCase().includes(query.search.toLowerCase()))
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, limit);
+  const active = orders.filter(item => item.status !== 'CANCELLED');
+  return { orders, summary: { count: active.length, total: money(active.reduce((sum, item) => sum + item.total, 0)), cancelled: orders.length - active.length } };
 });
 app.delete('/sales/:id', async (req) => {
   const id = (req.params as { id: string }).id;
