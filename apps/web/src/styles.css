@@ -678,7 +678,7 @@ textarea:focus {
 .cash-status{display:flex;align-items:center;gap:10px;border:1px solid var(--line);background:#fff;border-radius:14px;padding:10px 14px;color:var(--ink);text-align:left;cursor:pointer}
 .cash-status span:last-child{display:grid;gap:2px}.cash-status small{color:var(--muted)}.cash-status.open{background:#fff8e6;border-color:#e8c778}
 .operation-overlay{position:fixed;inset:0;background:rgba(10,15,24,.62);z-index:80;display:grid;place-items:center;padding:24px}
-.operation-dialog{background:#fff;border-radius:24px;box-shadow:0 30px 80px rgba(0,0,0,.28);width:min(920px,96vw);max-height:92vh;overflow:auto;padding:28px;border:1px solid #eadfca}
+.operation-dialog{background:#fff;border-radius:24px;box-shadow:0 30px 80px rgba(0,0,0,.28);width:min(1180px,96vw);max-height:92vh;overflow:auto;padding:28px;border:1px solid #eadfca}
 .operation-dialog-title{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:1px solid var(--line);padding-bottom:18px;margin-bottom:20px}
 .operation-dialog-title small{color:#a87500;font-weight:800}.operation-dialog-title h2{margin:4px 0 0;font-size:30px}.operation-dialog-title>button{border:0;background:#f3f4f5;border-radius:50%;width:40px;height:40px;font-size:28px;cursor:pointer}
 .operation-form{display:grid;gap:18px}.operation-form>p,.muted,.integration-explanation{color:var(--muted);margin:0;line-height:1.5}
@@ -704,6 +704,18 @@ textarea:focus {
 .opening-routing[open] summary{margin-bottom:12px}
 .cash-control .closing-summary{grid-template-columns:repeat(4,minmax(0,1fr))}
 @media(max-width:800px){.cash-control .closing-summary{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.report-filters{display:grid;grid-template-columns:160px 160px minmax(220px,1fr) auto;gap:12px;align-items:end;padding:16px;background:#f7f8f7;border:1px solid var(--line);border-radius:14px}
+.report-filters label{display:grid;gap:6px;font-size:12px;font-weight:800}.report-filters input{width:100%;border:1px solid #cfd5d2;border-radius:10px;padding:11px;background:#fff}
+.cash-session-table,.report-table,.order-table{display:grid;border:1px solid var(--line);border-radius:14px;overflow:hidden;background:#fff}
+.cash-session-table .table-head,.cash-session-table .table-row{grid-template-columns:1.1fr 1fr 1.35fr .55fr .8fr .7fr 1.5fr}
+.order-table .table-head,.order-table .table-row{grid-template-columns:.7fr 1.1fr 1.6fr .8fr .8fr .9fr}
+.report-table .table-head,.report-table .table-row{grid-template-columns:1.4fr repeat(3,1fr)}
+.report-table:has(.table-head span:nth-child(5)) .table-head,.report-table:has(.table-head span:nth-child(5)) .table-row{grid-template-columns:.8fr 1.5fr 1.3fr .8fr .8fr}
+.table-head,.table-row{display:grid;align-items:center;gap:14px;padding:12px 14px}.table-head{background:#e9edef;color:#425064;font-size:12px;font-weight:800}.table-row{border-top:1px solid var(--line);font-size:13px}.table-row small{display:block;color:var(--muted);margin-top:3px}
+.row-link{border:0;background:transparent;color:#916300;text-align:left;font-weight:850;padding:0}.row-actions{display:flex;gap:6px;flex-wrap:wrap}.row-actions button,.report-toolbar button{border:1px solid #d4bd85;background:#fffaf0;color:#6c4a00;border-radius:8px;padding:7px 9px;font-size:11px;font-weight:800}
+.row-actions button.danger-action,.report-toolbar button.danger-action{border-color:#efb4ad;color:#b42318;background:#fff5f4}.status-open,.status-closed,.status-cancelled{display:inline-flex;width:max-content;border-radius:99px;padding:5px 9px;font-size:11px;font-weight:850}.status-open{background:#dcf8e6;color:#086b38}.status-closed{background:#edf0f2;color:#4d5862}.status-cancelled{background:#fee8e6;color:#a6261b}
+.report-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.report-toolbar .status-open,.report-toolbar .status-closed{margin-left:auto}.operation-account span{display:grid;gap:3px}.operation-account small{color:#776b55}.order-summary{grid-template-columns:repeat(3,1fr)!important}
+@media(max-width:900px){.report-filters{grid-template-columns:1fr 1fr}.cash-session-table,.order-table,.report-table{overflow:auto}.cash-session-table .table-head,.cash-session-table .table-row,.order-table .table-head,.order-table .table-row,.report-table .table-head,.report-table .table-row{min-width:850px}}
 
 /* Detailed 80 mm non-fiscal receipt */
 .receipt-brand img{width:145px;height:54px;margin-bottom:4px}
