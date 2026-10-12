@@ -214,12 +214,12 @@ const findFinalConsumerId = async () => {
   finalConsumerCache = { expires: Date.now() + 10 * 60_000, id };
   return id;
 };
-const createOrder = async (input: { customerId?: string; sellerId: string; salesChannelId?: string; businessUnitId?: string; categoryId?: string; items: SaleItem[]; discount: number; freight: number; observations?: string; payments: PaymentSplit[]; idempotencyKey: string }) => {
+type SalesOrderInput = { customerId?: string; sellerId: string; salesChannelId?: string; businessUnitId?: string; categoryId?: string; items: SaleItem[]; discount: number; freight: number; observations?: string; payments: PaymentSplit[]; idempotencyKey: string; statusId?: string };
+const buildOrderPayload = async (input: SalesOrderInput) => {
   const customerId = input.customerId ?? await findFinalConsumerId();
-  const total = input.items.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0) - input.discount + input.freight;
   const itemNotes = input.items.filter(item => item.comment?.trim()).map(item => `${item.sku}: ${item.comment?.trim()}`).join(' | ');
   const orderNotes = [input.observations?.trim(), itemNotes ? `Itens: ${itemNotes}` : undefined].filter(Boolean).join('\n');
-  const payload = {
+  return {
     data: saoPauloDate(),
     numeroLoja: input.idempotencyKey,
     contato: { id: Number(customerId) },
@@ -227,6 +227,7 @@ const createOrder = async (input: { customerId?: string; sellerId: string; sales
     categoria: input.categoryId ? { id: Number(input.categoryId) } : undefined,
     loja: input.salesChannelId ? { id: Number(input.salesChannelId) } : undefined,
     unidadeNegocio: input.businessUnitId ? { id: Number(input.businessUnitId) } : undefined,
+    situacao: input.statusId ? { id: Number(input.statusId) } : undefined,
     itens: input.items.map(item => ({
       produto: { id: Number(item.productId) },
       codigo: item.sku,
@@ -237,12 +238,26 @@ const createOrder = async (input: { customerId?: string; sellerId: string; sales
     desconto: input.discount ? { valor: input.discount, unidade: 'REAL' } : undefined,
     transporte: input.freight ? { fretePorConta: 0, frete: input.freight } : undefined,
     observacoes: orderNotes || undefined,
-    parcelas: input.payments.map(payment => ({
+    parcelas: input.payments.length ? input.payments.map(payment => ({
       dataVencimento: saoPauloDate(),
       valor: payment.amount,
       formaPagamento: { id: Number(payment.paymentMethodId) }
-    }))
+    })) : undefined
   };
+};
+const readOrderNumber = async (id: string) => {
+  let number: string | undefined;
+  for (let attempt = 0; attempt < 3 && !number; attempt += 1) {
+    if (attempt) await delay(350 * attempt);
+    const detailResponse = await blingRequest(`/pedidos/vendas/${encodeURIComponent(id)}`);
+    if (!detailResponse.ok) continue;
+    const detailBody = await detailResponse.json().catch(() => ({})) as { data?: Record<string, unknown> };
+    number = textValue(detailBody.data?.numero);
+  }
+  return number;
+};
+const createOrder = async (input: SalesOrderInput) => {
+  const payload = await buildOrderPayload(input);
   const response = await blingRequest('/pedidos/vendas', { method: 'POST', body: JSON.stringify(payload), headers: { 'Idempotency-Key': input.idempotencyKey } });
   const body = await response.json() as { data?: { id?: string | number }; error?: unknown; message?: string; retorno?: unknown };
   if (!response.ok || !body.data?.id) {
@@ -252,15 +267,14 @@ const createOrder = async (input: { customerId?: string; sellerId: string; sales
     throw new Error(`Bling não criou o pedido (HTTP ${response.status})${detail ? `: ${detail.slice(0, 900)}` : ''}`);
   }
   const id = String(body.data.id);
-  let number: string | undefined;
-  for (let attempt = 0; attempt < 3 && !number; attempt += 1) {
-    if (attempt) await delay(350 * attempt);
-    const detailResponse = await blingRequest(`/pedidos/vendas/${encodeURIComponent(id)}`);
-    if (!detailResponse.ok) continue;
-    const detailBody = await detailResponse.json().catch(() => ({})) as { data?: Record<string, unknown> };
-    number = textValue(detailBody.data?.numero);
-  }
+  const number = await readOrderNumber(id);
   return { id, number, status: 'CONFIRMED' as const };
+};
+const updateOrder = async (orderId: string, input: SalesOrderInput) => {
+  const payload = await buildOrderPayload(input);
+  const response = await blingRequest(`/pedidos/vendas/${encodeURIComponent(orderId)}`, { method: 'PUT', body: JSON.stringify(payload) });
+  if (!response.ok && response.status !== 204) return blingFailure(response, 'atualização do pedido em atendimento');
+  return { id: orderId, number: await readOrderNumber(orderId), status: 'CONFIRMED' as const };
 };
 
 let categoriesCache: { expires: number; data: { id: string; name: string; type: number; active: boolean; isDefault: boolean }[] } | undefined;
@@ -285,6 +299,26 @@ const fetchFinancialCategories = async () => {
 
 let attendedStatusCache: { expires: number; id: string } | undefined;
 let cancelledStatusCache: { expires: number; id: string } | undefined;
+let inServiceStatusCache: { expires: number; id: string } | undefined;
+const findInServiceStatusId = async () => {
+  const configured = process.env.BLING_IN_SERVICE_STATUS_ID?.trim();
+  if (configured) return configured;
+  if (inServiceStatusCache && inServiceStatusCache.expires > Date.now()) return inServiceStatusCache.id;
+  const modulesResponse = await blingRequest('/situacoes/modulos');
+  if (!modulesResponse.ok) return blingFailure(modulesResponse, 'consulta dos módulos de situação');
+  const module = records(await modulesResponse.json()).find(row => /pedid.*venda|venda/i.test(`${textValue(row.nome) ?? ''} ${textValue(row.descricao) ?? ''}`));
+  const moduleId = module ? textValue(module.id) : undefined;
+  if (!moduleId) throw new Error('Bling não retornou o módulo de pedidos de venda');
+  const situationsResponse = await blingRequest(`/situacoes/modulos/${encodeURIComponent(moduleId)}`);
+  if (!situationsResponse.ok) return blingFailure(situationsResponse, 'consulta das situações de pedido');
+  const situations = records(await situationsResponse.json());
+  const situation = situations.find(row => /^(em atendimento|em andamento)$/i.test((textValue(row.nome) ?? '').trim()))
+    ?? situations.find(row => /atendimento|andamento|em aberto/i.test((textValue(row.nome) ?? '').trim()));
+  const id = situation ? textValue(situation.id) : undefined;
+  if (!id) throw new Error('Crie ou disponibilize a situação Em atendimento para pedidos de venda no Bling');
+  inServiceStatusCache = { expires: Date.now() + 10 * 60_000, id };
+  return id;
+};
 const findAttendedStatusId = async () => {
   const configured = process.env.BLING_ATTENDED_STATUS_ID?.trim();
   if (configured) return configured;
@@ -356,6 +390,11 @@ const deleteOrder = async (orderId: string) => {
   if (!response.ok && response.status !== 204 && response.status !== 404) return blingFailure(response, 'exclusão do pedido');
   return { deleted: true, warnings };
 };
+const deleteDraftOrder = async (orderId: string) => {
+  const response = await blingRequest(`/pedidos/vendas/${encodeURIComponent(orderId)}`, { method: 'DELETE' });
+  if (!response.ok && response.status !== 204 && response.status !== 404) return blingFailure(response, 'exclusão do pedido em atendimento');
+  return { deleted: true, warnings: [] as string[] };
+};
 const cancelOrder = async (orderId: string) => {
   const warnings: string[] = [];
   for (const action of ['estornar-contas', 'estornar-estoque']) {
@@ -367,6 +406,11 @@ const cancelOrder = async (orderId: string) => {
   const statusId = await findCancelledStatusId();
   await acceptOrderAction(await blingRequest(`/pedidos/vendas/${encodeURIComponent(orderId)}/situacoes/${encodeURIComponent(statusId)}`, { method: 'PATCH' }), 'alteração do pedido para Cancelado');
   return { cancelled: true, statusId, warnings };
+};
+const cancelDraftOrder = async (orderId: string) => {
+  const statusId = await findCancelledStatusId();
+  await acceptOrderAction(await blingRequest(`/pedidos/vendas/${encodeURIComponent(orderId)}/situacoes/${encodeURIComponent(statusId)}`, { method: 'PATCH' }), 'alteração do pedido para Cancelado');
+  return { cancelled: true, statusId, warnings: [] as string[] };
 };
 const generateNfce = async (orderId: string) => {
   const response = await blingRequest(`/pedidos/vendas/${encodeURIComponent(orderId)}/gerar-nfce`, { method: 'POST' });
@@ -539,7 +583,7 @@ export const getFidelizeiConnectionStatus = async () => {
   }
 };
 
-export const bling = { products: searchProducts, syncProducts, sellers: fetchSellers, paymentMethods: fetchPayments, financialCategories: fetchFinancialCategories, salesChannels: fetchSalesChannels, financialAccounts: fetchFinancialAccounts, cashEntries: fetchCashEntries, createCashEntry, findCustomer: findBlingCustomer, createCustomer: createBlingCustomer, createOrder, finalizeOrder, cancelOrder, deleteOrder, generateNfce, getFiscalCapability };
+export const bling = { products: searchProducts, syncProducts, sellers: fetchSellers, paymentMethods: fetchPayments, financialCategories: fetchFinancialCategories, salesChannels: fetchSalesChannels, financialAccounts: fetchFinancialAccounts, cashEntries: fetchCashEntries, createCashEntry, findCustomer: findBlingCustomer, createCustomer: createBlingCustomer, createOrder, updateOrder, findInServiceStatusId, finalizeOrder, cancelOrder, cancelDraftOrder, deleteOrder, deleteDraftOrder, generateNfce, getFiscalCapability };
 export const fidelizei = {
   findCustomer: async (cpf: string) => {
     const normalized = cpf.replace(/\D/g, '');
