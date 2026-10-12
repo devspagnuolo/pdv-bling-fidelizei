@@ -106,6 +106,7 @@ function App() {
   const [loginBusy, setLoginBusy] = useState(false);
   const [cpf, setCpf] = useState('');
   const [fidelizeiPhone, setFidelizeiPhone] = useState('');
+  const [fidelizeiEmail, setFidelizeiEmail] = useState('');
   const [programConsent, setProgramConsent] = useState(false);
   const [customerName, setCustomerName] = useState('');
   const [customerPhone, setCustomerPhone] = useState('');
@@ -425,6 +426,7 @@ function App() {
     setCustomerPhone(data.bling?.phone ?? '');
     setCustomerEmail(data.bling?.email ?? '');
     if (data.bling?.phone) setFidelizeiPhone(data.bling.phone);
+    if (data.bling?.email) setFidelizeiEmail(data.bling.email);
     if (!data.found) {
       const unavailable = Object.values(data.systems).includes('UNAVAILABLE');
       return setMessage(unavailable
@@ -444,6 +446,7 @@ function App() {
     setCatalogSearchActive(false);
     setCpf('');
     setFidelizeiPhone('');
+    setFidelizeiEmail('');
     setProgramConsent(false);
     setCustomerName('');
     setCustomerPhone('');
@@ -544,7 +547,7 @@ function App() {
         name: customer.bling.name,
         cpf: customer.cpf,
         phone: fidelizeiPhone,
-        email: customer.bling.email,
+        email: fidelizeiEmail,
         programConsent: true
       })
     });
@@ -552,7 +555,10 @@ function App() {
     if (!response.ok) return setMessage(data?.message ?? 'Não foi possível cadastrar a cliente no Fidelizei.');
     await lookup();
     setProgramConsent(false);
-    setMessage('Adesão ao Fidelizei registrada com consentimento.');
+    const emailConfirmed = data?.welcomeEmailSent || data?.temporaryPasswordSent;
+    setMessage(emailConfirmed
+      ? 'Cliente cadastrado no Fidelizei e e-mail de acesso provisório enviado.'
+      : 'Cliente cadastrado no Fidelizei. A plataforma não confirmou o envio do e-mail de acesso; confira a automação no Fidelizei.');
   };
   const registerBlingCustomer = async () => {
     if (!customerName.trim() || cpf.replace(/\D/g, '').length !== 11) return setMessage('Informe nome e CPF válido para cadastrar no Bling.');
@@ -566,8 +572,29 @@ function App() {
       });
       const data = await response.json().catch(() => undefined);
       if (!response.ok) throw new Error(data?.message ?? 'Não foi possível cadastrar o cliente no Bling.');
+      let fidelizeiCreated = false;
+      let fidelizeiEmailConfirmed = false;
+      if (programConsent) {
+        if (!customerPhone.trim() || !/^\S+@\S+\.\S+$/.test(customerEmail.trim())) {
+          throw new Error('Cliente cadastrado no Bling. Para cadastrar também no Fidelizei, informe celular e e-mail válidos.');
+        }
+        const fidelizeiResponse = await apiFetch(`${api}/customers/fidelizei`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ name: customerName, cpf, phone: customerPhone, email: customerEmail, programConsent: true })
+        });
+        const fidelizeiData = await fidelizeiResponse.json().catch(() => undefined);
+        if (!fidelizeiResponse.ok) throw new Error(`Cliente cadastrado no Bling, mas o Fidelizei recusou o cadastro: ${fidelizeiData?.message ?? 'erro não informado'}`);
+        fidelizeiCreated = true;
+        fidelizeiEmailConfirmed = Boolean(fidelizeiData?.welcomeEmailSent || fidelizeiData?.temporaryPasswordSent);
+      }
       await lookup();
-      setMessage(data.idempotent ? 'Cliente já estava cadastrado no Bling.' : 'Cliente cadastrado no Bling e vinculado à venda.');
+      setProgramConsent(false);
+      setMessage(fidelizeiCreated
+        ? fidelizeiEmailConfirmed
+          ? 'Cliente cadastrado no Bling e Fidelizei. E-mail de acesso provisório enviado.'
+          : 'Cliente cadastrado no Bling e Fidelizei. O Fidelizei não confirmou o envio do e-mail de acesso.'
+        : data.idempotent ? 'Cliente localizado no Bling e vinculado à venda.' : 'Cliente cadastrado no Bling e vinculado à venda.');
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Falha ao cadastrar o cliente no Bling.');
     } finally {
@@ -874,7 +901,7 @@ function App() {
     setOperationBusy(true);
     setOrderActionError('');
     try {
-      const response = await apiFetch(`${api}/sales/${encodeURIComponent(order.id)}`, { method: 'DELETE' });
+      const response = await apiFetch(`${api}/sales/${encodeURIComponent(order.id)}/delete`, { method: 'POST' });
       const data = await response.json();
       if (!response.ok) throw new Error(data.message ?? 'Não foi possível excluir o pedido.');
       setOpenSales(current => current.filter(item => item.id !== order.id));
@@ -1008,8 +1035,9 @@ function App() {
                 <p>A venda pode continuar sem pontuação. A adesão exige consentimento explícito da cliente.</p>
                 {customer.bling && <div className="enrollment-box">
                   <input value={fidelizeiPhone} onChange={e => setFidelizeiPhone(e.target.value)} placeholder="Celular com DDD" />
+                  <input value={fidelizeiEmail} onChange={e => setFidelizeiEmail(e.target.value)} placeholder="E-mail para envio do acesso" type="email" />
                   <label className="consent-check"><input type="checkbox" checked={programConsent} onChange={e => setProgramConsent(e.target.checked)} /><span>A cliente aceita participar do programa Fidelizei.</span></label>
-                  <button disabled={!programConsent || !fidelizeiPhone} onClick={() => void enrollFidelizei()}>Cadastrar no Fidelizei</button>
+                  <button disabled={!programConsent || !fidelizeiPhone || !fidelizeiEmail} onClick={() => void enrollFidelizei()}>Cadastrar e enviar acesso</button>
                 </div>}
               </>}
             </div>
@@ -1020,7 +1048,8 @@ function App() {
               <label>Nome completo<input value={customerName} onChange={event => setCustomerName(event.target.value)} placeholder="Nome da cliente" /></label>
               <label>Celular<input value={customerPhone} onChange={event => setCustomerPhone(event.target.value)} placeholder="DDD + número" /></label>
               <label>E-mail<input value={customerEmail} onChange={event => setCustomerEmail(event.target.value)} placeholder="Opcional" type="email" /></label>
-              <button className="finish" disabled={customerSaving || !customerName.trim()} onClick={() => void registerBlingCustomer()}>{customerSaving ? 'Salvando no Bling…' : 'Cadastrar no Bling'}</button>
+              <label className="consent-check"><input type="checkbox" checked={programConsent} onChange={event => setProgramConsent(event.target.checked)} /><span>Com consentimento, cadastrar também no Fidelizei e solicitar o e-mail de acesso provisório.</span></label>
+              <button className="finish" disabled={customerSaving || !customerName.trim()} onClick={() => void registerBlingCustomer()}>{customerSaving ? 'Salvando…' : programConsent ? 'Cadastrar no Bling + Fidelizei' : 'Cadastrar no Bling'}</button>
             </div>
           </section>}
           <label>Cupom Fidelizei<div className="row"><input disabled={!loyaltyCustomer} value={coupon} onChange={e => setCoupon(e.target.value.toUpperCase())} placeholder={loyaltyCustomer ? 'Digite o código do cupom' : 'Disponível para clientes Fidelizei'} /><button disabled={!loyaltyCustomer || !coupon} onClick={applyCoupon}>Aplicar cupom</button></div></label>
