@@ -173,10 +173,27 @@ const fetchSalesChannels = async () => {
 };
 const findBlingCustomer = async (cpf: string): Promise<BlingCustomer | undefined> => {
   const document = cpf.replace(/\D/g, '');
-  const response = await blingRequest(`/contatos?pagina=1&limite=1&numeroDocumento=${encodeURIComponent(document)}`);
-  if (!response.ok) throw new Error(`Bling não retornou o cliente (HTTP ${response.status})`);
-  const raw = records(await response.json())[0];
-  if (!raw) return undefined;
+  const find = async (query: string) => {
+    const response = await blingRequest(`/contatos?pagina=1&limite=100&criterio=1&${query}`);
+    if (!response.ok) throw new Error(`Bling não retornou o cliente (HTTP ${response.status})`);
+    return records(await response.json()).find(row =>
+      (textValue(row.numeroDocumento ?? row.cnpj ?? row.cpf) ?? '').replace(/\D/g, '') === document
+    );
+  };
+  // criterio=1 é indispensável: o padrão do Bling lista somente os últimos incluídos
+  // e pode ocultar um CPF antigo, levando a uma tentativa indevida de duplicação.
+  const summary = await find(`numeroDocumento=${encodeURIComponent(document)}`)
+    ?? await find(`pesquisa=${encodeURIComponent(document)}`);
+  if (!summary) return undefined;
+  const summaryId = textValue(summary.id);
+  let raw = summary;
+  if (summaryId) {
+    const detailResponse = await blingRequest(`/contatos/${encodeURIComponent(summaryId)}`);
+    if (detailResponse.ok) {
+      const detailBody = await detailResponse.json().catch(() => ({})) as { data?: Record<string, unknown> };
+      raw = detailBody.data ?? summary;
+    }
+  }
   const id = textValue(raw.id);
   const name = textValue(raw.nome ?? raw.fantasia);
   if (!id || !name) return undefined;
@@ -199,7 +216,13 @@ const createBlingCustomer = async (input: { name: string; cpf: string; phone?: s
   const body = await response.json().catch(() => ({})) as { data?: { id?: string | number }; message?: string; error?: unknown };
   if (!response.ok || !body.data?.id) {
     const detail = body.message ?? (body.error ? JSON.stringify(body.error) : JSON.stringify(body));
-    throw new Error(`Bling não cadastrou o cliente (HTTP ${response.status})${detail ? `: ${detail.slice(0, 700)}` : ''}`);
+    // Uma corrida ou um contato antigo pode fazer o Bling acusar duplicidade mesmo
+    // após a consulta. Nesse caso, recuperamos o contato e tratamos como idempotente.
+    if (response.status === 400 && /CPF.*(?:já|ja).*cadastrad|documento.*(?:já|ja).*existe/i.test(detail)) {
+      const duplicate = await findBlingCustomer(cpf);
+      if (duplicate) return { ...duplicate, idempotent: true };
+    }
+    throw Object.assign(new Error(`Bling não cadastrou o cliente (HTTP ${response.status})${detail ? `: ${detail.slice(0, 700)}` : ''}`), { statusCode: response.status });
   }
   return { id: String(body.data.id), cpf, name: payload.nome, phone: input.phone, email: input.email, idempotent: false };
 };
@@ -563,7 +586,10 @@ const mapFidelizeiCustomer = (payload: unknown, cpf: string): FidelizeiCustomer 
     tier: eligible ? 'Participante' : 'Adesão pendente',
     points: numericValue(raw.pointsBalance),
     benefits: eligible ? ['Elegível para pontuação'] : [],
-    coupons: []
+    coupons: [],
+    welcomeEmailSent: raw.welcomeEmailSent === true || raw.emailSent === true,
+    temporaryPasswordSent: raw.temporaryPasswordSent === true || raw.passwordEmailSent === true,
+    onboardingMessage: textValue(raw.onboardingMessage ?? raw.message)
   };
 };
 
@@ -600,7 +626,9 @@ export const fidelizei = {
         cpf: input.cpf.replace(/\D/g, ''),
         phone: input.phone?.replace(/\D/g, ''),
         email: input.email,
-        programConsent: input.programConsent
+        programConsent: input.programConsent,
+        sendWelcomeEmail: Boolean(input.email),
+        sendTemporaryPassword: Boolean(input.email)
       })
     });
     if (!response.ok) return fidelizeiError(response, 'cadastro da cliente');
