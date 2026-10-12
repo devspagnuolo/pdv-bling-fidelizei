@@ -766,3 +766,6 @@ main{padding:12px 16px;max-width:1680px;margin:0 auto}
 @media(max-width:1100px){.workspace{grid-template-columns:1fr}.cart{min-height:auto}.integration-strip{flex-wrap:wrap}.open-sales-button{order:4}}
 
 
+
+/* Avisos do PDV precisam ficar acima das janelas de operação (caixa, pedidos, etc.) */
+.message { z-index: 120; }
