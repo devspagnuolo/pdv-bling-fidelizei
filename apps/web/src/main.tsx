@@ -145,6 +145,7 @@ function App() {
   const [orderSearch, setOrderSearch] = useState('');
   const [orderScope, setOrderScope] = useState<'all' | 'active' | 'deleted' | 'cancelled'>('active');
   const [orderActionError, setOrderActionError] = useState('');
+  const [cashFeedback, setCashFeedback] = useState<{ kind: 'error' | 'info'; text: string }>();
   const [pendingOperations, setPendingOperations] = useState<any>();
   const [cashControl, setCashControl] = useState<any>();
   const [cashSessions, setCashSessions] = useState<CashSession[]>([]);
@@ -629,7 +630,7 @@ function App() {
     setCompleting(true);
     try {
       const activeSale = await create();
-      if (!activeSale) return;
+      if (!activeSale) { fiscalPrintWindow?.close(); return; }
       const r = await apiFetch(`${api}/sales/${activeSale.id}/complete`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -642,16 +643,19 @@ function App() {
         })
       });
       const data = await r.json();
-      if (!r.ok) return setMessage(data.message ?? 'Não foi possível concluir a venda.');
+      if (!r.ok) { fiscalPrintWindow?.close(); return setMessage(data.message ?? 'Não foi possível concluir a venda.'); }
       const completionMessage = data.status === 'COMPLETED'
         ? `Venda concluída. Pedido Bling nº ${data.blingOrderNumber ?? data.blingOrderId}${data.fiscalStatus === 'REQUESTED' ? data.fiscalDocumentUrl ? ' · Documento fiscal aberto para impressão.' : ' · NFC-e solicitada; aguarde a autorização no Bling para imprimir o documento fiscal.' : data.fiscalStatus === 'FAILED' ? ' · Pedido salvo, mas a NFC-e precisa ser verificada no Bling.' : ' · Impressão do comprovante não fiscal aberta.'}`
-        : 'Pedido criado; estoque, financeiro ou situação no Bling exigem conferência.';
+        : `Pedido Bling nº ${data.blingOrderNumber ?? data.blingOrderId} criado, mas o Bling não concluiu a baixa de estoque, o financeiro ou a situação "Atendido". ${data.lastError ? `Motivo: ${data.lastError}` : 'Confira o pedido no Bling.'}`;
       if (emitFiscal && data.fiscalDocumentUrl && fiscalPrintWindow) fiscalPrintWindow.location.replace(data.fiscalDocumentUrl);
       else if (emitFiscal) fiscalPrintWindow?.close();
       setOpenSales(current => current.filter(item => item.id !== data.id));
       newSale();
       if (!emitFiscal) setReceipt(data);
       setMessage(completionMessage);
+    } catch (error) {
+      fiscalPrintWindow?.close();
+      setMessage(error instanceof Error ? `Não foi possível finalizar a venda: ${error.message}` : 'Não foi possível finalizar a venda. Verifique a conexão e tente novamente.');
     } finally {
       setCompleting(false);
     }
@@ -789,15 +793,27 @@ function App() {
   const reopenCash = async (session: CashSession) => {
     if (!window.confirm('Reabrir este caixa para realizar ajustes?')) return;
     setOperationBusy(true);
+    setCashFeedback(undefined);
     try {
       const response = await apiFetch(`${api}/cash/sessions/${session.id}/reopen`, { method: 'POST' });
-      const data = await response.json();
+      const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data.message ?? 'Não foi possível reabrir o caixa.');
-      setCashSession(data.session);
+      const reopened = data.session as CashSession;
       setCashControl(undefined);
       await loadCashSessions();
-      setMessage('Caixa reaberto. O evento ficou registrado apenas no controle interno do PDV.');
-    } catch (error) { setMessage(error instanceof Error ? error.message : 'Falha ao reabrir o caixa.'); }
+      if (reopened.operatorId === operatorId) {
+        // Caixa do operador atual: passa a ser o caixa em uso, com a mesma conta, loja e unidade da abertura original.
+        setCashSession(reopened);
+        setSelectedAccount(reopened.accountId);
+        setSelectedChannel(reopened.channelId ?? 'DEFAULT');
+        setSelectedBusinessUnit(reopened.businessUnitId ?? '');
+        setOperationModal(undefined);
+        setMessage('Caixa reaberto. Você já pode fazer ajustes e novas vendas. O evento ficou registrado apenas no controle interno do PDV.');
+      } else {
+        // As vendas e movimentações exigem o operador responsável pelo caixa.
+        setCashFeedback({ kind: 'info', text: `Caixa reaberto para o operador ${sellers.find(item => item.id === reopened.operatorId)?.name ?? reopened.operatorId}. Para fazer ajustes ou vendas nele, entre no PDV com esse operador.` });
+      }
+    } catch (error) { setCashFeedback({ kind: 'error', text: error instanceof Error ? error.message : 'Falha ao reabrir o caixa.' }); }
     finally { setOperationBusy(false); }
   };
   const deleteCash = async (session: CashSession) => {
@@ -829,6 +845,7 @@ function App() {
       void loadOrders();
     }
     if (type === 'control') {
+      setCashFeedback(undefined);
       setCashControl(undefined);
       setCashSessions([]);
       void loadCashSessions();
@@ -1193,6 +1210,9 @@ function App() {
           <button className="finish" disabled={operationBusy || numberValue(operationAmount) <= 0} onClick={() => void registerCashOperation(operationModal === 'withdrawal' ? 'WITHDRAWAL' : 'SUPPLY')}>{operationBusy ? 'Registrando no Bling…' : `Registrar ${operationModal === 'withdrawal' ? 'sangria' : 'suprimento'} no Bling`}</button>
         </div>}
         {operationModal === 'control' && <div className="closing-review cash-control">
+          {cashFeedback && (cashFeedback.kind === 'error'
+            ? <div className="order-action-error" role="alert"><div><b>Não foi possível reabrir o caixa</b><span>{cashFeedback.text}</span></div></div>
+            : <div className="message success" role="status">{cashFeedback.text}</div>)}
           {!cashControl ? <>
             <div className="report-filters">
               <label>Início<input type="date" value={cashFrom} onChange={event => setCashFrom(event.target.value)} /></label>

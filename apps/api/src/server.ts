@@ -122,7 +122,7 @@ app.get('/health', async (_req, reply) => {
       pendingSales = pending.rows[0]?.count ?? 0;
     }
   } catch (error) {
-    app.log.error({ error }, 'Health check do banco falhou');
+    app.log.error({ err: error }, 'Health check do banco falhou');
   }
   const blingStatus = await getBlingConnectionStatus();
   const ok = database || !pool;
@@ -446,21 +446,44 @@ app.post('/cash/sessions/:id/reopen', async (req) => {
   const session = await cashSessionById(id);
   if (!session) return badRequest('Caixa não encontrado');
   if (session.status === 'OPEN') return { reopened: true, session, idempotent: true };
-  if (await currentCashSession(session.operatorId)) return badRequest('O operador já possui outro caixa aberto');
-  await database.query('begin');
+  // Cada operador só pode ter um caixa aberto. Em vez de uma recusa genérica, informamos
+  // qual caixa precisa ser fechado para que a reabertura possa acontecer.
+  const alreadyOpen = await currentCashSession(session.operatorId);
+  if (alreadyOpen) {
+    const openedAt = new Date(alreadyOpen.openedAt).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+    return conflict(`Este operador já tem outro caixa aberto (${alreadyOpen.channelName ?? 'Configuração padrão'}, desde ${openedAt}). Feche esse caixa antes de reabrir este.`);
+  }
+  // Uma única instrução atômica: reabre somente se ainda estiver fechado e registra o evento,
+  // guardando o fechamento anterior para auditoria (o resumo é limpo ao reabrir).
+  let reopenedRows: unknown[];
   try {
-    await database.query(`update pdv_cash_sessions set status='OPEN', closed_at=null, closing_summary=null where id=$1`, [id]);
-    await database.query(
-      `insert into pdv_cash_operations (id, session_id, operation_type, amount, data)
-       values ($1,$2,'REOPENING',0,$3::jsonb)`,
-      [randomUUID(), id, JSON.stringify({ syncStatus: 'NOT_REQUIRED', controlOnly: true })]
-    );
-    await database.query('commit');
+    const result = await database.query(
+      `with previous as (
+         select id, closed_at, closing_summary from pdv_cash_sessions where id=$1 and status='CLOSED'
+       ), reopened as (
+         update pdv_cash_sessions set status='OPEN', closed_at=null, closing_summary=null
+         where id=$1 and status='CLOSED'
+         returning id
+       )
+       insert into pdv_cash_operations (id, session_id, operation_type, amount, data)
+       select $2::uuid, reopened.id, 'REOPENING', 0,
+         jsonb_build_object('syncStatus', 'NOT_REQUIRED', 'controlOnly', true,
+           'previousClosedAt', previous.closed_at, 'previousClosingSummary', previous.closing_summary)
+       from reopened join previous on previous.id = reopened.id
+       returning id`,
+      [id, randomUUID()]
+    ) as { rows: unknown[] };
+    reopenedRows = result.rows;
   } catch (error) {
-    await database.query('rollback');
+    // Corrida com outra abertura do mesmo operador: o índice único de caixa aberto impede duplicidade.
+    if ((error as { code?: string }).code === '23505') {
+      return conflict('Este operador acabou de abrir outro caixa. Feche esse caixa antes de reabrir este.');
+    }
     throw error;
   }
-  return { reopened: true, session: await cashSessionById(id) };
+  const reopened = await cashSessionById(id);
+  if (!reopenedRows.length && reopened?.status !== 'OPEN') return conflict('Não foi possível reabrir este caixa. Atualize a lista e tente novamente.');
+  return { reopened: true, session: reopened };
 });
 app.delete('/cash/sessions/:id', async (req, reply) => {
   const id = (req.params as { id: string }).id;
@@ -834,7 +857,7 @@ app.post('/sales/:id/complete', async (req) => {
       sale.blingFulfillment = await bling.finalizeOrder(order.id);
     } catch (error) {
       fulfillmentError = error instanceof Error ? error.message.slice(0, 500) : 'Falha ao lançar contas, estoque ou marcar o pedido como atendido';
-      app.log.error({ error, saleId: sale.id, blingOrderId: order.id }, 'Pedido criado, mas a finalização automática do Bling exige conferência');
+      app.log.error({ err: error, saleId: sale.id, blingOrderId: order.id }, 'Pedido criado, mas a finalização automática do Bling exige conferência');
     }
     if (pool) await pool.query(
       `update bling_products product set stock=product.stock-item.quantity
@@ -849,7 +872,7 @@ app.post('/sales/:id/complete', async (req) => {
         sale.fiscalDocumentUrl = fiscal.documentUrl;
       } catch (error) {
         sale.fiscalStatus = 'FAILED';
-        app.log.error({ error, saleId: sale.id, blingOrderId: order.id }, 'Pedido criado, mas a NFC-e não foi gerada no Bling');
+        app.log.error({ err: error, saleId: sale.id, blingOrderId: order.id }, 'Pedido criado, mas a NFC-e não foi gerada no Bling');
       }
     }
     // O Fidelizei credita os pontos ao processar o pedido do Bling. O PDV somente
