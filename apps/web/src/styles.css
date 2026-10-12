@@ -747,4 +747,19 @@ textarea:focus {
   .receipt-brand img{background:transparent!important}
 }
 
+/* Compact modern POS density */
+main{padding:12px 16px;max-width:1680px;margin:0 auto}
+.pos-header{margin:-12px -16px 10px;padding:10px 18px;border-radius:0 0 12px 12px}
+.vivi-logo{width:132px;height:48px}.brand-block{gap:12px}.brand-block h1{font-size:22px}.brand-block p{font-size:12px}.brand-block small{font-size:10px}
+.header-actions{gap:8px}.operator-select{min-height:42px;padding:7px 10px}.new-sale-button,.operations-trigger,.open-sales-button{min-height:38px;padding:0 13px;font-size:12px}
+.open-sales-button{border:1px solid #dab64f;border-radius:9px;color:#4e3900;background:#fff5cf;font-weight:850}
+.integration-strip{margin-bottom:10px;padding:8px 12px;border-radius:11px;gap:12px}.integration-strip>div{min-height:34px}.integration-strip b{font-size:12px}.integration-strip small{font-size:10px}
+.connection-actions{display:flex!important;gap:5px!important;align-items:center}.connection-actions button,.connection-actions a{border:1px solid #d7bd72;border-radius:7px;padding:5px 8px;color:#6c4b00;background:#fffaf0;font-size:10px;font-weight:800;text-decoration:none}.connection-actions button{cursor:pointer}
+.cash-status{padding:7px 10px;border-radius:9px}.steps{margin-bottom:10px;border-radius:10px}.steps button{min-height:46px;padding:7px 14px;font-size:12px}
+.workspace{gap:10px}.panel,.cart{padding:16px;border-radius:14px}.panel{min-height:560px}.cart{min-height:560px}.section-title,.cart-title{margin-bottom:14px}.section-title h2,.cart-title h2{font-size:22px}.section-title small,.cart-title small{font-size:9px}.section-title>span{padding:7px 10px;font-size:10px}
+.catalog-search{gap:8px}.search-field input,.search-action{min-height:44px}.empty-state.product-empty{min-height:210px}.catalog{gap:7px}.product{padding:10px 12px}.cart-items{max-height:355px}.cart-item{padding:10px 0}.cart-summary-card{padding:12px}.totals-grid{gap:8px}.totals-grid>div{padding:10px}.totals-grid b{font-size:18px}.payment-line{padding:10px}.payment-section,.commercial-terms,.sale-details{margin-top:12px}
+.operation-dialog{padding:20px;border-radius:18px}.operation-dialog-title{padding-bottom:12px;margin-bottom:14px}.operation-dialog-title h2{font-size:25px}.closing-review{gap:12px}
+.order-row-actions .resume-action{border:1px solid #8bc8a4;background:#effaf3;color:#08713d}
+@media(max-width:1100px){.workspace{grid-template-columns:1fr}.cart{min-height:auto}.integration-strip{flex-wrap:wrap}.open-sales-button{order:4}}
+
 
