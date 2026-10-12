@@ -62,6 +62,7 @@ export type Sale = {
   total: number;
   blingOrderId?: string;
   blingOrderNumber?: string;
+  blingDraftStatusId?: string;
   blingFulfillment?: { stockPosted: boolean; accountsPosted: boolean; attended: boolean; statusId?: string };
   cancelledAt?: string;
   fiscalDocumentUrl?: string;
