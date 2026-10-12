@@ -163,8 +163,9 @@ app.post('/auth/login', async (req, reply) => {
   return { token: issueToken(principal), principal };
 });
 
-app.get('/integrations/status', async () => {
-  if (integrationStatusCache && integrationStatusCache.expires > Date.now()) return integrationStatusCache.value;
+app.get('/integrations/status', async (req) => {
+  const refresh = (req.query as { refresh?: string }).refresh === '1';
+  if (!refresh && integrationStatusCache && integrationStatusCache.expires > Date.now()) return integrationStatusCache.value;
   if (!integrationStatusPromise) {
     integrationStatusPromise = (async () => {
       const value = {
@@ -610,6 +611,20 @@ const canonicalSaleItems = async (requested: SaleItem[]) => {
     return { productId: product.id, sku: product.sku, name: product.name, quantity: item.quantity, unitPrice: money(product.price), comment: item.comment };
   });
 };
+const blingOrderInput = (sale: Sale, session: any, payments: PaymentSplit[] = sale.payments ?? []) => ({
+  customerId: sale.customer?.bling?.id,
+  sellerId: sale.sellerId,
+  categoryId: sale.categoryId,
+  items: sale.items,
+  discount: sale.discount,
+  freight: sale.freight ?? 0,
+  observations: sale.observations,
+  salesChannelId: session.channelId === 'DEFAULT' ? undefined : session.channelId,
+  businessUnitId: session.channelId === 'DEFAULT' ? undefined : session.businessUnitId,
+  payments,
+  idempotencyKey: sale.id,
+  statusId: sale.blingDraftStatusId
+});
 app.post('/sales', async (req) => {
   const body = req.body as {
     cashSessionId?: string;
@@ -658,7 +673,60 @@ app.post('/sales', async (req) => {
     ...amounts,
     createdAt: new Date().toISOString()
   };
+  sale.blingDraftStatusId = await bling.findInServiceStatusId();
+  const order = await bling.createOrder(blingOrderInput(sale, session, []));
+  sale.blingOrderId = order.id;
+  sale.blingOrderNumber = order.number;
   await persist(sale);
+  return sale;
+});
+app.put('/sales/:id', async (req) => {
+  const sale = await getSale((req.params as { id: string }).id);
+  if (!sale) return badRequest('Venda em atendimento não encontrada');
+  if (sale.status !== 'OPEN') return conflict('Somente vendas em atendimento podem ser atualizadas');
+  const body = req.body as { sellerId?: string; categoryId?: string; items?: SaleItem[]; customerCpf?: string; manualDiscount?: number; freight?: number; observations?: string; emitFiscal?: boolean };
+  if (!body.items?.length) return badRequest('Adicione ao menos um produto');
+  const session = await cashSessionById(sale.cashSessionId);
+  if (!session || session.status !== 'OPEN') return badRequest('O caixa desta venda não está mais aberto');
+  const items = await canonicalSaleItems(body.items);
+  const lookup = body.customerCpf ? await lookupCustomer(body.customerCpf) : undefined;
+  const categories = await bling.financialCategories();
+  const category = categories.find(item => item.id === body.categoryId) ?? categories.find(item => item.id === sale.categoryId);
+  if (!category) return badRequest('A categoria financeira da venda não foi encontrada no Bling');
+  const manualDiscount = money(Math.max(0, Number(body.manualDiscount) || 0));
+  const freight = money(Math.max(0, Number(body.freight) || 0));
+  Object.assign(sale, {
+    sellerId: body.sellerId || sale.sellerId,
+    categoryId: category.id,
+    categoryName: category.name,
+    customer: lookup?.found ? lookup : undefined,
+    items,
+    manualDiscount,
+    observations: body.observations?.trim().slice(0, 2000) || undefined,
+    emitFiscal: body.emitFiscal === true,
+    ...calculate(items, manualDiscount + (sale.coupon?.discount ?? 0), freight)
+  });
+  sale.freight = freight;
+  sale.blingDraftStatusId ??= await bling.findInServiceStatusId();
+  const order = sale.blingOrderId
+    ? await bling.updateOrder(sale.blingOrderId, blingOrderInput(sale, session, []))
+    : await bling.createOrder(blingOrderInput(sale, session, []));
+  sale.blingOrderId = order.id;
+  sale.blingOrderNumber = order.number ?? sale.blingOrderNumber;
+  await persist(sale);
+  return sale;
+});
+app.get('/sales/open', async (req) => {
+  const cashSessionId = String((req.query as { cashSessionId?: string }).cashSessionId ?? '');
+  if (pool) {
+    const result = await pool.query(`select data from pdv_sales where status='OPEN' and ($1='' or data->>'cashSessionId'=$1) order by updated_at desc limit 50`, [cashSessionId]) as { rows: { data: Sale }[] };
+    return result.rows.map(row => row.data);
+  }
+  return [...sales.values()].filter(item => item.status === 'OPEN' && (!cashSessionId || item.cashSessionId === cashSessionId));
+});
+app.get('/sales/:id', async (req) => {
+  const sale = await getSale((req.params as { id: string }).id);
+  if (!sale) throw Object.assign(new Error('Venda não encontrada'), { statusCode: 404 });
   return sale;
 });
 app.post('/sales/:id/coupon', async (req) => {
@@ -672,6 +740,8 @@ app.post('/sales/:id/coupon', async (req) => {
     reservationId: reservation.reservationId,
     ...calculate(sale.items, (sale.manualDiscount ?? 0) + reservation.coupon.discount, sale.freight ?? 0)
   });
+  const session = await cashSessionById(sale.cashSessionId);
+  if (session && sale.blingOrderId) await bling.updateOrder(sale.blingOrderId, blingOrderInput(sale, session, []));
   await persist(sale);
   return sale;
 });
@@ -752,19 +822,9 @@ app.post('/sales/:id/complete', async (req) => {
     change: totalChange
   });
   try {
-    const order = await bling.createOrder({
-      customerId: sale.customer?.bling?.id,
-      sellerId: sale.sellerId,
-      categoryId: sale.categoryId,
-      items: sale.items,
-      discount: sale.discount,
-      freight: sale.freight ?? 0,
-      observations: sale.observations,
-      salesChannelId: session.channelId === 'DEFAULT' ? undefined : session.channelId,
-      businessUnitId: session.channelId === 'DEFAULT' ? undefined : session.businessUnitId,
-      payments,
-      idempotencyKey: sale.id
-    });
+    const order = sale.blingOrderId
+      ? await bling.updateOrder(sale.blingOrderId, blingOrderInput(sale, session, payments))
+      : await bling.createOrder(blingOrderInput(sale, session, payments));
     sale.blingOrderId = order.id;
     sale.blingOrderNumber = order.number;
     await persist(sale);
@@ -801,7 +861,7 @@ app.post('/sales/:id/complete', async (req) => {
     await persist(sale);
     return sale;
   } catch (error) {
-    sale.status = 'SYNC_FAILED';
+    sale.status = sale.blingOrderId ? 'OPEN' : 'SYNC_FAILED';
     sale.lastError = error instanceof Error ? error.message.slice(0, 500) : 'Falha desconhecida na sincronização';
     await persist(sale);
     app.log.error({ err: error, saleId: sale.id }, 'Venda pendente: resultado da criação no Bling precisa de conferência');
@@ -887,7 +947,9 @@ app.delete('/sales/:id', async (req) => {
   if (!sale) return badRequest('Pedido não encontrado no PDV');
   if (sale.status === 'DELETED') return { ...sale, idempotent: true };
   if (sale.status === 'CANCELLED') return badRequest('Pedido cancelado não pode ser excluído por este fluxo');
-  const deletion = sale.blingOrderId ? await bling.deleteOrder(sale.blingOrderId) : { deleted: false, warnings: [] as string[] };
+  const deletion = sale.blingOrderId
+    ? sale.status === 'OPEN' ? await bling.deleteDraftOrder(sale.blingOrderId) : await bling.deleteOrder(sale.blingOrderId)
+    : { deleted: false, warnings: [] as string[] };
   let loyaltyWarning: string | undefined;
   if (sale.fidelizeiTransactionId) {
     try { await fidelizei.reverseSale(sale.id); }
@@ -914,7 +976,7 @@ app.post('/sales/:id/cancel', async (req) => {
   if (sale.status === 'CANCELLED') return { ...sale, idempotent: true };
   if (sale.status === 'DELETED') return badRequest('Pedido excluído não pode ser cancelado');
   if (!sale.blingOrderId) return badRequest('Pedido ainda não foi criado no Bling');
-  const cancellation = await bling.cancelOrder(sale.blingOrderId);
+  const cancellation = sale.status === 'OPEN' ? await bling.cancelDraftOrder(sale.blingOrderId) : await bling.cancelOrder(sale.blingOrderId);
   let loyaltyWarning: string | undefined;
   if (sale.fidelizeiTransactionId) {
     try { await fidelizei.reverseSale(sale.id); }
