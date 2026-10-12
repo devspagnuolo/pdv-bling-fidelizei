@@ -578,6 +578,7 @@ app.post('/customers/fidelizei', async (req) => {
   const body = req.body as { name: string; cpf: string; phone?: string; email?: string; programConsent: boolean };
   if (!body.name || !body.cpf || body.programConsent !== true) return badRequest('Nome, CPF e consentimento explícito são obrigatórios para adesão');
   if (!body.phone) return badRequest('Celular é obrigatório para adesão ao Fidelizei');
+  if (!body.email || !/^\S+@\S+\.\S+$/.test(body.email.trim())) return badRequest('E-mail válido é obrigatório para enviar o acesso provisório do Fidelizei');
   return fidelizei.upsertCustomer(body);
 });
 const canonicalSaleItems = async (requested: SaleItem[]) => {
@@ -941,7 +942,7 @@ app.get('/sales/orders', async (req) => {
   const active = orders.filter(item => !['CANCELLED','DELETED'].includes(item.status));
   return { orders, summary: { count: active.length, total: money(active.reduce((sum, item) => sum + item.total, 0)), cancelled: orders.filter(item => item.status === 'CANCELLED').length, deleted: orders.filter(item => item.status === 'DELETED').length } };
 });
-app.delete('/sales/:id', async (req) => {
+const deleteSale = async (req: any) => {
   const id = (req.params as { id: string }).id;
   const sale = await getSale(id);
   if (!sale) return badRequest('Pedido não encontrado no PDV');
@@ -968,7 +969,11 @@ app.delete('/sales/:id', async (req) => {
   sale.lastError = [loyaltyWarning, ...(deletion.warnings ?? [])].filter(Boolean).join(' · ') || undefined;
   await persist(sale);
   return { ...sale, deletedInBling: Boolean(sale.blingOrderId), loyaltyWarning, blingWarnings: deletion.warnings };
-});
+};
+app.delete('/sales/:id', deleteSale);
+// Alguns navegadores, proxies e redes corporativas bloqueiam DELETE. A ação POST
+// preserva a mesma semântica e torna a exclusão operacional no caixa.
+app.post('/sales/:id/delete', deleteSale);
 app.post('/sales/:id/cancel', async (req) => {
   const id = (req.params as { id: string }).id;
   const sale = await getSale(id);
