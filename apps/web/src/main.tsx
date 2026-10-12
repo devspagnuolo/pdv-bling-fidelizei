@@ -114,6 +114,11 @@ function App() {
   const [customer, setCustomer] = useState<CustomerLookup>();
   const [coupon, setCoupon] = useState('');
   const [sale, setSale] = useState<any>();
+  const activeSaleRef = useRef<any>(undefined);
+  const draftQueueRef = useRef<Promise<any>>(Promise.resolve());
+  const saleGenerationRef = useRef(0);
+  const [draftBusy, setDraftBusy] = useState(false);
+  const [openSales, setOpenSales] = useState<any[]>([]);
   const [payments, setPayments] = useState<PaymentEntry[]>([]);
   const [menuOpen, setMenuOpen] = useState(false);
   const [cashAccounts, setCashAccounts] = useState<CashAccount[]>([]);
@@ -174,6 +179,8 @@ function App() {
     }
     return response;
   };
+
+  useEffect(() => { activeSaleRef.current = sale; }, [sale]);
 
 
   useEffect(() => {
@@ -323,13 +330,22 @@ function App() {
   };
 
   const changeCart = (next: Item[]) => {
+    if (!cashSession) {
+      setMessage('Abra o caixa antes de adicionar produtos. O pedido será numerado no Bling ao incluir o primeiro item.');
+      setOperationModal('open');
+      return;
+    }
+    if (!next.length && activeSaleRef.current) {
+      setMessage('O pedido em atendimento precisa ter ao menos um item. Para encerrá-lo, use Excluir em Pedidos do PDV.');
+      return;
+    }
     if (sale?.coupon) {
       setMessage('O cupom Fidelizei já foi consumido. Finalize esta venda antes de alterar os itens.');
       return;
     }
     setItems(next);
-    setSale(undefined);
     setMessage('');
+    if (next.length && cashSession) void saveDraft(next);
   };
   const add = (p: Product) => {
     const current = items.find(i => i.id === p.id);
@@ -420,6 +436,7 @@ function App() {
     setMessage('Cliente localizado no Fidelizei. Ainda não possui cadastro no Bling.');
   };
   const newSale = () => {
+    saleGenerationRef.current += 1;
     setStep('product');
     setItems([]);
     setQuery('');
@@ -434,6 +451,7 @@ function App() {
     setCustomer(undefined);
     setCoupon('');
     setSale(undefined);
+    activeSaleRef.current = undefined;
     setDiscountMode('value');
     setDiscountInput('0');
     setFreightInput('0');
@@ -446,6 +464,75 @@ function App() {
     setMessage('');
     searchInputRef.current?.focus();
   };
+
+  const draftPayload = (draftItems: Item[]) => ({
+    cashSessionId: cashSession?.id,
+    operatorId,
+    sellerId: seller,
+    categoryId,
+    customerCpf: customer?.found ? customer.cpf : undefined,
+    manualDiscount,
+    freight,
+    observations,
+    emitFiscal,
+    items: draftItems.map(x => ({ productId: x.id, sku: x.sku, name: x.name, quantity: x.quantity, unitPrice: x.price, comment: x.comment }))
+  });
+  const saveDraft = (draftItems: Item[] = items) => {
+    if (!cashSession || !draftItems.length) return Promise.resolve(undefined);
+    const generation = saleGenerationRef.current;
+    draftQueueRef.current = draftQueueRef.current.catch(() => undefined).then(async () => {
+      if (generation !== saleGenerationRef.current) return undefined;
+      setDraftBusy(true);
+      try {
+        const current = activeSaleRef.current;
+        const response = await apiFetch(current ? `${api}/sales/${current.id}` : `${api}/sales`, {
+          method: current ? 'PUT' : 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(draftPayload(draftItems))
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.message ?? 'Não foi possível salvar o pedido em atendimento.');
+        if (generation === saleGenerationRef.current) {
+          activeSaleRef.current = data;
+          setSale(data);
+        }
+        setOpenSales(currentList => [data, ...currentList.filter(item => item.id !== data.id)]);
+        setMessage(`Pedido Bling nº ${data.blingOrderNumber ?? data.blingOrderId} · Em atendimento`);
+        return data;
+      } catch (error) {
+        setMessage(error instanceof Error ? error.message : 'Falha ao salvar o pedido em atendimento.');
+        return undefined;
+      } finally {
+        setDraftBusy(false);
+      }
+    });
+    return draftQueueRef.current;
+  };
+  const loadOpenSales = async () => {
+    if (!cashSession) return setOpenSales([]);
+    const response = await apiFetch(`${api}/sales/open?cashSessionId=${encodeURIComponent(cashSession.id)}`);
+    const data = await response.json().catch(() => []);
+    if (response.ok) setOpenSales(Array.isArray(data) ? data : []);
+  };
+  const resumeSale = (draft: any) => {
+    saleGenerationRef.current += 1;
+    activeSaleRef.current = draft;
+    setSale(draft);
+    setItems((draft.items ?? []).map((item: any) => ({ id: item.productId, sku: item.sku, name: item.name, quantity: item.quantity, price: item.unitPrice, stock: 0, comment: item.comment })));
+    setCustomer(draft.customer);
+    setCpf(draft.customer?.cpf ?? '');
+    setSeller(draft.sellerId ?? seller);
+    setCategoryId(draft.categoryId ?? categoryId);
+    setDiscountMode('value');
+    setDiscountInput(String(draft.manualDiscount ?? 0).replace('.', ','));
+    setFreightInput(String(draft.freight ?? 0).replace('.', ','));
+    setObservations(draft.observations ?? '');
+    setEmitFiscal(draft.emitFiscal === true);
+    setStep('product');
+    setOperationModal(undefined);
+    setMessage(`Pedido Bling nº ${draft.blingOrderNumber ?? draft.blingOrderId} retomado.`);
+  };
+  useEffect(() => { void loadOpenSales(); }, [cashSession?.id]);
 
   const enrollFidelizei = async () => {
     if (!customer?.bling || !programConsent) return;
@@ -493,36 +580,10 @@ function App() {
       setMessage('Abra o caixa antes de iniciar a venda.');
       return;
     }
-    const r = await apiFetch(`${api}/sales`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        cashSessionId: cashSession.id,
-        operatorId,
-        sellerId: seller,
-        categoryId,
-        customerCpf: customer?.found ? customer.cpf : undefined,
-        manualDiscount,
-        freight,
-        observations,
-        emitFiscal,
-        items: items.map(x => ({
-          productId: x.id,
-          sku: x.sku,
-          name: x.name,
-          quantity: x.quantity,
-          unitPrice: x.price,
-          comment: x.comment
-        }))
-      })
-    });
-    const data = await r.json();
-    if (!r.ok) { setMessage(data.message); return; }
-    setSale(data);
-    return data;
+    return saveDraft(items);
   };
   const applyCoupon = async () => {
-    const activeSale = sale ?? await create();
+    const activeSale = await create();
     if (!activeSale) return;
     const r = await apiFetch(`${api}/sales/${activeSale.id}/coupon`, {
       method: 'POST',
@@ -540,7 +601,7 @@ function App() {
     const fiscalPrintWindow = emitFiscal ? window.open('about:blank', '_blank') : null;
     setCompleting(true);
     try {
-      const activeSale = sale ?? await create();
+      const activeSale = await create();
       if (!activeSale) return;
       const r = await apiFetch(`${api}/sales/${activeSale.id}/complete`, {
         method: 'POST',
@@ -560,6 +621,7 @@ function App() {
         : 'Pedido criado; estoque, financeiro ou situação no Bling exigem conferência.';
       if (emitFiscal && data.fiscalDocumentUrl && fiscalPrintWindow) fiscalPrintWindow.location.replace(data.fiscalDocumentUrl);
       else if (emitFiscal) fiscalPrintWindow?.close();
+      setOpenSales(current => current.filter(item => item.id !== data.id));
       newSale();
       if (!emitFiscal) setReceipt(data);
       setMessage(completionMessage);
@@ -596,6 +658,16 @@ function App() {
     } finally {
       setLoginBusy(false);
     }
+  };
+  const refreshConnections = async () => {
+    setMessage('Atualizando conexões…');
+    try {
+      const response = await apiFetch(`${api}/integrations/status?refresh=1`);
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.message ?? 'Não foi possível atualizar as conexões.');
+      setIntegrations(data);
+      setMessage('Status das conexões atualizado.');
+    } catch (error) { setMessage(error instanceof Error ? error.message : 'Falha ao atualizar as conexões.'); }
   };
   const logout = () => {
     sessionStorage.removeItem('pdv-auth-token');
@@ -805,6 +877,8 @@ function App() {
       const response = await apiFetch(`${api}/sales/${encodeURIComponent(order.id)}`, { method: 'DELETE' });
       const data = await response.json();
       if (!response.ok) throw new Error(data.message ?? 'Não foi possível excluir o pedido.');
+      setOpenSales(current => current.filter(item => item.id !== order.id));
+      if (activeSaleRef.current?.id === order.id) newSale();
       await loadOrders();
       const warnings = [...(data.blingWarnings ?? []), ...(data.loyaltyWarning ? [data.loyaltyWarning] : [])];
       setMessage(warnings.length ? `Pedido ${label} excluído. Conferir: ${warnings.join(' · ')}` : `Pedido ${label} excluído do Bling e retirado dos pedidos ativos do PDV.`);
@@ -824,6 +898,8 @@ function App() {
       const response = await apiFetch(`${api}/sales/${encodeURIComponent(order.id)}/cancel`, { method: 'POST' });
       const data = await response.json();
       if (!response.ok) throw new Error(data.message ?? 'Não foi possível cancelar o pedido.');
+      setOpenSales(current => current.filter(item => item.id !== order.id));
+      if (activeSaleRef.current?.id === order.id) newSale();
       await loadOrders();
       const warnings = [...(data.blingWarnings ?? []), ...(data.loyaltyWarning ? [data.loyaltyWarning] : [])];
       setMessage(warnings.length ? `Pedido ${label} cancelado. Conferir: ${warnings.join(' · ')}` : `Pedido ${label} cancelado no Bling e no PDV.`);
@@ -859,6 +935,7 @@ function App() {
           </div>}
         </div>
         <button className="new-sale-button" onClick={newSale}>＋ Nova venda</button>
+        {cashSession && <button className="open-sales-button" onClick={() => openOperation('orders')}>{openSales.length} em atendimento</button>}
       </div>
     </header>
 
@@ -866,7 +943,7 @@ function App() {
       <div>
         <span className={integrations?.bling.connected ? 'integration-dot online' : 'integration-dot'} />
         <div><b>Bling</b><small>{integrations?.bling.connected ? 'Conectado ao PDV' : integrations?.bling.configured ? 'Pronto para autorizar' : 'Configuração pendente'}</small></div>
-        {integrations?.bling.configured && !integrations.bling.connected && <a href={`${api}/integrations/bling/connect`}>Conectar</a>}
+        {integrations?.bling.configured && <div className="connection-actions"><button onClick={() => void refreshConnections()} title="Atualizar status">↻</button><a href={`${api}/integrations/bling/connect`}>{integrations.bling.connected ? 'Reconectar' : 'Conectar'}</a></div>}
       </div>
       <div>
         <span className={integrations?.fidelizaPlus.connected ? 'integration-dot online' : 'integration-dot'} />
@@ -893,7 +970,7 @@ function App() {
             <div className="search-field"><span className="scan-icon">⌁</span><input ref={searchInputRef} id="product-search" className="search" value={query} onChange={e => handleProductInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); if (scanTimerRef.current) window.clearTimeout(scanTimerRef.current); void searchCatalog(); } }} placeholder="Bipe para adicionar ou digite o código e pressione Enter" autoFocus /><kbd>F2</kbd></div>
             <button className="search-action" onClick={() => void searchCatalog()} disabled={searchingCatalog}>{searchingCatalog ? 'Buscando…' : 'Buscar'}</button>
           </div>
-          <p className="scanner-hint">Leitor de código de barras conectado? Basta bipar e pressionar Enter.</p>
+          <p className="scanner-hint">Ao bipar, o produto entra automaticamente. Use Enter apenas ao digitar o código.</p>
           <div className="catalog">{filtered.map(p => <button className={p.stock <= 0 ? "product out-of-stock" : "product"} onClick={() => add(p)} key={p.id}>
             <span><b>{p.name}</b><small>{p.sku}{p.barcode ? ` · ${p.barcode}` : ''} · <em className={p.stock <= 0 ? "stock zero" : "stock"}>{p.stock <= 0 ? "Sem estoque" : `${p.stock} em estoque`}</em></small></span><strong>{brl.format(p.price)}</strong>
           </button>)}</div>
@@ -905,7 +982,7 @@ function App() {
 
         {step === 'customer' && <>
           <div className="section-title"><div><small>ETAPA 2</small><h2>Identificar cliente</h2></div><span>Bling + Fidelizei</span></div>
-          <label>CPF<div className="row"><input value={cpf} onChange={e => { setCpf(e.target.value); setCustomer(undefined); setSale(undefined); setMessage(''); }} placeholder="000.000.000-00" /><button onClick={lookup}>Consultar</button></div></label>
+          <label>CPF<div className="row"><input value={cpf} onChange={e => { setCpf(e.target.value); setCustomer(undefined); setMessage(''); }} placeholder="000.000.000-00" /><button onClick={lookup}>Consultar</button></div></label>
           {!customer && <div className="customer-card final-consumer"><div><span className="vip">PADRÃO BLING</span><h3>Consumidor Final</h3><p>Identificação opcional. A venda pode seguir normalmente sem CPF.</p></div><button onClick={() => setStep('payment')}>Continuar sem identificar</button></div>}
           {customer?.found ? <div className="customer-card unified">
             <div className="customer-identity">
@@ -962,8 +1039,8 @@ function App() {
             <div className="grand"><small>Total da venda</small><b>{brl.format(total)}</b></div>
           </div>
           <section className="commercial-terms">
-            <div className="field-group"><label>Desconto manual</label><div className="discount-control"><select value={discountMode} disabled={Boolean(sale?.coupon)} onChange={e => { setDiscountMode(e.target.value as 'value' | 'percent'); setSale(undefined); }}><option value="value">R$ valor</option><option value="percent">% percentual</option></select><input value={discountInput} disabled={Boolean(sale?.coupon)} inputMode="decimal" onChange={e => { setDiscountInput(e.target.value); setSale(undefined); }} /></div></div>
-            <div className="field-group"><label>Frete / valor adicional</label><input value={freightInput} disabled={Boolean(sale?.coupon)} inputMode="decimal" onChange={e => { setFreightInput(e.target.value); setSale(undefined); }} /></div>
+            <div className="field-group"><label>Desconto manual</label><div className="discount-control"><select value={discountMode} disabled={Boolean(sale?.coupon)} onChange={e => setDiscountMode(e.target.value as 'value' | 'percent')}><option value="value">R$ valor</option><option value="percent">% percentual</option></select><input value={discountInput} disabled={Boolean(sale?.coupon)} inputMode="decimal" onChange={e => setDiscountInput(e.target.value)} /></div></div>
+            <div className="field-group"><label>Frete / valor adicional</label><input value={freightInput} disabled={Boolean(sale?.coupon)} inputMode="decimal" onChange={e => setFreightInput(e.target.value)} /></div>
           </section>
 
           <section className="payment-section">
@@ -1004,15 +1081,15 @@ function App() {
           </section>
 
           <section className="sale-details">
-            <label>Vendedor do Bling<select value={seller} disabled={Boolean(sale?.coupon)} onChange={e => { setSeller(e.target.value); setSale(undefined); }}><option value="">Selecione o vendedor responsável</option>{sellers.map(item => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
-            <label>Categoria financeira<select value={categoryId} disabled={Boolean(sale?.coupon)} onChange={e => { setCategoryId(e.target.value); setSale(undefined); }}><option value="">Selecione</option>{financialCategories.map(item => <option value={item.id} key={item.id}>{item.name}</option>)}</select><small>Usada no lançamento de Contas a Receber do Bling.</small></label>
+            <label>Vendedor do Bling<select value={seller} disabled={Boolean(sale?.coupon)} onChange={e => setSeller(e.target.value)}><option value="">Selecione o vendedor responsável</option>{sellers.map(item => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
+            <label>Categoria financeira<select value={categoryId} disabled={Boolean(sale?.coupon)} onChange={e => setCategoryId(e.target.value)}><option value="">Selecione</option>{financialCategories.map(item => <option value={item.id} key={item.id}>{item.name}</option>)}</select><small>Usada no lançamento de Contas a Receber do Bling.</small></label>
             {!sellers.length && <p className="inline-warning">Nenhum vendedor retornado pelo Bling. Reconecte a integração e atualize a página.</p>}
-            <label>Observações da venda<textarea value={observations} disabled={Boolean(sale?.coupon)} onChange={e => { setObservations(e.target.value); setSale(undefined); }} placeholder="Ex.: venda online, retirada, instruções de troca ou entrega" /></label>
+            <label>Observações da venda<textarea value={observations} disabled={Boolean(sale?.coupon)} onChange={e => setObservations(e.target.value)} placeholder="Ex.: venda online, retirada, instruções de troca ou entrega" /></label>
             <div className="output-choice">
-              <button className={!emitFiscal ? 'active' : ''} disabled={Boolean(sale?.coupon)} onClick={() => { setEmitFiscal(false); setSale(undefined); }}>
+              <button className={!emitFiscal ? 'active' : ''} disabled={Boolean(sale?.coupon)} onClick={() => setEmitFiscal(false)}>
                 <span>▣</span><b>Comprovante não fiscal</b><small>Padrão · imprimir após concluir</small>
               </button>
-              <button className={emitFiscal ? 'active fiscal' : ''} disabled={Boolean(sale?.coupon)} onClick={() => { setEmitFiscal(true); setSale(undefined); }}>
+              <button className={emitFiscal ? 'active fiscal' : ''} disabled={Boolean(sale?.coupon)} onClick={() => setEmitFiscal(true)}>
                 <span>◇</span><b>Emitir NFC-e</b><small>Somente por seleção · configuração Bling</small>
               </button>
             </div>
@@ -1029,7 +1106,7 @@ function App() {
       </article>
 
       <aside className="cart">
-        <div className="cart-title"><div><small>PEDIDO ATUAL</small><h2>Itens da venda</h2></div><span>{items.reduce((n, i) => n + i.quantity, 0)}</span></div>
+        <div className="cart-title"><div><small>{sale?.blingOrderNumber ? `PEDIDO ${sale.blingOrderNumber} · EM ATENDIMENTO` : draftBusy ? 'ABRINDO PEDIDO NO BLING…' : 'PEDIDO ATUAL'}</small><h2>Itens da venda</h2></div><span>{items.reduce((n, i) => n + i.quantity, 0)}</span></div>
         <div className="cart-items">{items.length ? items.map(i => <div className="cart-item" key={i.id}>
           <div className="cart-product-info"><b>{i.name}</b><small>{i.sku} · {brl.format(i.price)} un.</small><input className="item-comment" value={i.comment ?? ''} onChange={e => commentItem(i.id, e.target.value)} placeholder="Comentário do item (opcional)" /></div>
           <div className="qty"><button onClick={() => quantity(i.id, -1)}>−</button><span>{i.quantity}</span><button onClick={() => quantity(i.id, 1)}>+</button></div>
@@ -1154,7 +1231,7 @@ function App() {
           <div className="report-filters order-filters"><label>Início<input type="date" value={orderFrom} onChange={event => setOrderFrom(event.target.value)} /></label><label>Fim<input type="date" value={orderTo} onChange={event => setOrderTo(event.target.value)} /></label><label>Cliente, CPF ou pedido<input value={orderSearch} placeholder="Pesquisar" onChange={event => setOrderSearch(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') void loadOrders(); }} /></label><button className="finish" disabled={operationBusy} onClick={() => void loadOrders()}>Filtrar pedidos</button></div>
           <div className="closing-summary order-summary"><div><small>Pedidos ativos</small><b>{ordersSummary.count}</b></div><div><small>Total ativo</small><b>{brl.format(ordersSummary.total)}</b></div><div><small>Excluídos</small><b>{ordersSummary.deleted}</b></div><div><small>Cancelados</small><b>{ordersSummary.cancelled}</b></div></div>
           <div className="order-table"><div className="table-head"><span>Número</span><span>Data</span><span>Cliente</span><span>Total</span><span>Situação</span><span>Ações</span></div>{orders.map(item => <div className="table-row" key={item.id}>
-            <b>{item.blingOrderNumber ?? item.blingOrderId ?? item.id.slice(0, 8)}</b><span>{new Date(item.createdAt).toLocaleString('pt-BR')}</span><span>{item.customer?.name ?? 'Consumidor Final'}<small>{item.customer?.cpf ?? ''}</small></span><b>{brl.format(item.total)}</b><span className={item.status === 'DELETED' || item.status === 'CANCELLED' ? 'status-cancelled' : 'status-open'}>{item.status === 'DELETED' ? 'Excluído' : item.status === 'CANCELLED' ? 'Cancelado' : item.status === 'COMPLETED' ? 'Atendido' : item.status}</span><span className="order-row-actions">{!['DELETED','CANCELLED','PROCESSING'].includes(item.status) && <><button className="cancel-action" disabled={operationBusy} onClick={() => void cancelOrder(item)}>Cancelar</button><button className="danger-action" disabled={operationBusy} onClick={() => void deleteOrder(item)}>Excluir</button></>}</span>
+            <b>{item.blingOrderNumber ?? item.blingOrderId ?? item.id.slice(0, 8)}</b><span>{new Date(item.createdAt).toLocaleString('pt-BR')}</span><span>{item.customer?.name ?? 'Consumidor Final'}<small>{item.customer?.cpf ?? ''}</small></span><b>{brl.format(item.total)}</b><span className={item.status === 'DELETED' || item.status === 'CANCELLED' ? 'status-cancelled' : 'status-open'}>{item.status === 'DELETED' ? 'Excluído' : item.status === 'CANCELLED' ? 'Cancelado' : item.status === 'COMPLETED' ? 'Atendido' : item.status === 'OPEN' ? 'Em atendimento' : item.status}</span><span className="order-row-actions">{item.status === 'OPEN' && item.cashSessionId === cashSession?.id && <button className="resume-action" disabled={operationBusy} onClick={() => resumeSale(item)}>Retomar</button>}{!['DELETED','CANCELLED','PROCESSING'].includes(item.status) && <><button className="cancel-action" disabled={operationBusy} onClick={() => void cancelOrder(item)}>Cancelar</button><button className="danger-action" disabled={operationBusy} onClick={() => void deleteOrder(item)}>Excluir</button></>}</span>
           </div>)}{!orders.length && <div className="empty-state compact">{operationBusy ? 'Consultando pedidos…' : 'Nenhum pedido encontrado no período.'}</div>}</div>
         </div>}
         {operationModal === 'pending' && <div className="return-list pending-list">
