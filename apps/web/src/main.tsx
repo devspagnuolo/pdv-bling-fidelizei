@@ -96,9 +96,9 @@ function App() {
   const [catalogSearchActive, setCatalogSearchActive] = useState(false);
   const [searchingCatalog, setSearchingCatalog] = useState(false);
   const [seller, setSeller] = useState('');
-  const [operatorId, setOperatorId] = useState(() => String(storedPrincipal().operatorId ?? ''));
-  const [operatorName, setOperatorName] = useState(() => String(storedPrincipal().operatorName ?? ''));
-  const [authRole, setAuthRole] = useState<'OPERATOR' | 'MANAGER' | undefined>(() => storedPrincipal().role);
+  const [operatorId, setOperatorId] = useState(() => sessionStorage.getItem('pdv-auth-token') ? String(storedPrincipal().operatorId ?? '') : '');
+  const [operatorName, setOperatorName] = useState(() => sessionStorage.getItem('pdv-auth-token') ? String(storedPrincipal().operatorName ?? '') : '');
+  const [authRole, setAuthRole] = useState<'OPERATOR' | 'MANAGER' | undefined>(() => sessionStorage.getItem('pdv-auth-token') ? storedPrincipal().role : undefined);
   const [authEnabled, setAuthEnabled] = useState<boolean>();
   const [authToken, setAuthToken] = useState(() => sessionStorage.getItem('pdv-auth-token') ?? '');
   const [loginOperator, setLoginOperator] = useState('');
@@ -222,7 +222,6 @@ function App() {
       setPaymentMethods(methods);
       setSeller(s[0]?.id ?? '');
       setLoginOperator(s[0]?.id ?? '');
-      if (!authToken) setOperatorId(s[0]?.id ?? '');
       const defaultId = methods.find(method => method.isDefault)?.id ?? methods[0]?.id ?? '';
       setPayments(defaultId ? [{ key: newPaymentKey(), paymentMethodId: defaultId, amount: '0', receivedAmount: '' }] : []);
     }).catch(() => setMessage('Não foi possível carregar os dados sincronizados do PDV.'));
@@ -587,17 +586,20 @@ function App() {
       setOperatorId(principal.operatorId);
       setOperatorName(principal.operatorName);
       setAuthRole(principal.role);
-      setSeller(current => current || principal.operatorId);
+      setSeller(principal.operatorId);
       setLoginPin('');
       setMessage('');
+      return true;
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Falha no login.');
+      return false;
     } finally {
       setLoginBusy(false);
     }
   };
   const logout = () => {
     sessionStorage.removeItem('pdv-auth-token');
+    sessionStorage.removeItem('pdv-auth-principal');
     setAuthToken('');
     setOperatorId('');
     setOperatorName('');
@@ -742,6 +744,7 @@ function App() {
     }
   };
   const openCash = async () => {
+    if (authEnabled && !authToken) return setMessage('Identifique o operador e informe o PIN antes de abrir o caixa.');
     if (!operatorId || !selectedAccount || !selectedChannel || (selectedChannel !== 'DEFAULT' && !selectedBusinessUnit)) return setMessage('Selecione operador, loja, unidade e conta financeira do Bling.');
     setOperationBusy(true);
     try {
@@ -789,7 +792,7 @@ function App() {
       setCashSession(undefined);
       setDayHistory(undefined);
       setMessage('Caixa fechado. O saldo final permaneceu somente no controle interno e não gerou movimento financeiro no Bling.');
-      await refreshCashSession();
+      logout();
     } catch (error) { setMessage(error instanceof Error ? error.message : 'Falha ao fechar o caixa.'); }
     finally { setOperationBusy(false); }
   };
@@ -836,7 +839,7 @@ function App() {
     <header className="pos-header">
       <div className="brand-block"><img className="vivi-logo" src="/vivi-logo-original.png" alt="Vivi Moda Plus Size" /><div><small>VIVI MODA · CAIXA 01</small><h1>Frente de caixa</h1><p>Venda integrada ao Bling e Fidelizei</p></div></div>
       <div className="header-actions">
-        {authEnabled ? <div className="operator-select authenticated-operator"><span>Operador</span><b>{operatorName || 'Não autenticado'}</b><small>{authRole === 'MANAGER' ? 'Gerente' : 'Operador'}</small>{authToken && <button onClick={logout}>Sair</button>}</div> : <label className="operator-select"><span>Operador</span><select value={operatorId} onChange={e => setOperatorId(e.target.value)}>
+        {authEnabled ? <div className="operator-select authenticated-operator"><span>Operador</span><b>{operatorName || 'Definido na abertura'}</b><small>{authToken ? authRole === 'MANAGER' ? 'Gerente' : 'Operador' : 'Caixa fechado'}</small>{authToken && <button onClick={logout}>Sair</button>}</div> : <label className="operator-select"><span>Operador</span><select value={operatorId} onChange={e => setOperatorId(e.target.value)}>
           <option value="">Selecione no Bling</option>{sellers.map(s => <option value={s.id} key={s.id}>{s.name}</option>)}
         </select></label>}
         <div className="operations-wrap">
@@ -1044,19 +1047,6 @@ function App() {
       </aside>
     </section>
 
-    {authEnabled && !authToken && <div className="operation-overlay auth-overlay" role="dialog" aria-modal="true" aria-label="Acesso ao PDV">
-      <section className="operation-dialog auth-dialog">
-        <div className="operation-dialog-title"><div><small>ACESSO SEGURO</small><h2>Entrar no frente de caixa</h2></div></div>
-        <div className="operation-form">
-          <p>Selecione seu usuário do Bling e informe o PIN do PDV.</p>
-          <label>Operador<select value={loginOperator} onChange={event => setLoginOperator(event.target.value)}><option value="">Selecione</option>{sellers.map(item => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
-          <label>PIN<input type="password" inputMode="numeric" autoComplete="current-password" value={loginPin} onChange={event => setLoginPin(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') void login(); }} /></label>
-          <button className="finish" disabled={loginBusy || !loginOperator || !loginPin} onClick={() => void login()}>{loginBusy ? 'Entrando…' : 'Entrar'}</button>
-          {message && <p className="message">{message}</p>}
-        </div>
-      </section>
-    </div>}
-
     {operationModal && <div className="operation-overlay" role="dialog" aria-modal="true" aria-label="Operação de caixa">
       <section className="operation-dialog">
         <div className="operation-dialog-title">
@@ -1065,6 +1055,14 @@ function App() {
         </div>
         {operationModal === 'open' && <div className="operation-form">
           <div className="opening-notice"><b>Caixa fechado</b><span>Selecione a mesma loja e unidade de negócio configuradas no Frente de Caixa do Bling.</span></div>
+          {authEnabled && !authToken ? <div className="opening-auth">
+            <div><b>Identificar operador</b><span>Selecione o operador responsável pela abertura e informe o PIN do PDV.</span></div>
+            <label>Operador<select value={loginOperator} onChange={event => setLoginOperator(event.target.value)}><option value="">Selecione</option>{sellers.map(item => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
+            <label>PIN<input type="password" inputMode="numeric" autoComplete="current-password" value={loginPin} onChange={event => setLoginPin(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') void login(); }} /></label>
+            <button className="finish" disabled={loginBusy || !loginOperator || !loginPin} onClick={() => void login()}>{loginBusy ? 'Validando…' : 'Continuar abertura'}</button>
+            {message && <p className="message">{message}</p>}
+          </div> : <>
+          {authEnabled && <div className="opening-operator"><span>Operador responsável</span><b>{operatorName}</b><button className="secondary" onClick={logout}>Trocar operador</button></div>}
           <label>Loja / canal de venda<select value={selectedChannel} onChange={event => {
             const id = event.target.value;
             const channel = salesChannels.find(item => item.id === id);
@@ -1075,6 +1073,7 @@ function App() {
           <label>Troco / saldo inicial<input value={operationAmount} inputMode="decimal" placeholder="0,00" onChange={event => setOperationAmount(event.target.value)} /></label>
           <details className="opening-routing"><summary>Conta financeira usada nos lançamentos</summary><label>Conta financeira do Bling<select value={selectedAccount} onChange={event => setSelectedAccount(event.target.value)}><option value="">Selecione</option>{cashAccounts.map(account => <option value={account.id} key={account.id}>{account.name} · {account.type}</option>)}</select></label></details>
           <button className="finish" disabled={operationBusy || !selectedAccount || !selectedChannel || (selectedChannel !== 'DEFAULT' && !selectedBusinessUnit)} onClick={() => void openCash()}>{operationBusy ? 'Abrindo…' : 'Abrir caixa'}</button>
+          </>}
         </div>}
         {(operationModal === 'withdrawal' || operationModal === 'supply') && <div className="operation-form">
           <div className="operation-account"><span>Conta financeira</span><b>{cashSession?.accountName}</b></div>
