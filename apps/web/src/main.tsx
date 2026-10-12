@@ -1043,13 +1043,18 @@ function App() {
             </div>
           </div> : customer ? <div className="empty-state">Cliente não localizado. Cadastre no Bling abaixo ou continue como Consumidor Final.</div> : null}
           {customer && !customer.bling && customer.systems.bling !== 'UNAVAILABLE' && <section className="customer-registration">
-            <div><small>CADASTRO RÁPIDO</small><h3>Cadastrar cliente no Bling</h3><p>O cliente ficará disponível no Bling e será vinculado ao pedido desta venda.</p></div>
+            <div className="customer-registration-heading">
+              <div><small>CADASTRO RÁPIDO</small><h3>Cadastrar cliente</h3><p>Salve no Bling e, com autorização da cliente, também no Fidelizei.</p></div>
+              <span className="registration-destination">{programConsent ? 'Bling + Fidelizei' : 'Bling'}</span>
+            </div>
             <div className="customer-registration-grid">
-              <label>Nome completo<input value={customerName} onChange={event => setCustomerName(event.target.value)} placeholder="Nome da cliente" /></label>
-              <label>Celular<input value={customerPhone} onChange={event => setCustomerPhone(event.target.value)} placeholder="DDD + número" /></label>
-              <label>E-mail<input value={customerEmail} onChange={event => setCustomerEmail(event.target.value)} placeholder="Opcional" type="email" /></label>
-              <label className="consent-check"><input type="checkbox" checked={programConsent} onChange={event => setProgramConsent(event.target.checked)} /><span>Com consentimento, cadastrar também no Fidelizei e solicitar o e-mail de acesso provisório.</span></label>
-              <button className="finish" disabled={customerSaving || !customerName.trim()} onClick={() => void registerBlingCustomer()}>{customerSaving ? 'Salvando…' : programConsent ? 'Cadastrar no Bling + Fidelizei' : 'Cadastrar no Bling'}</button>
+              <label className="customer-field customer-name">Nome completo<input value={customerName} onChange={event => setCustomerName(event.target.value)} placeholder="Nome completo da cliente" /></label>
+              <label className="customer-field customer-phone">Celular<input value={customerPhone} onChange={event => setCustomerPhone(event.target.value)} placeholder="(11) 99999-9999" inputMode="tel" /></label>
+              <label className="customer-field customer-email">E-mail<input value={customerEmail} onChange={event => setCustomerEmail(event.target.value)} placeholder="cliente@email.com" type="email" /></label>
+              <div className="customer-registration-footer">
+                <label className="consent-check"><input type="checkbox" checked={programConsent} onChange={event => setProgramConsent(event.target.checked)} /><span><b>Cadastrar também no Fidelizei</b><small>A cliente autorizou a adesão e o envio do acesso provisório por e-mail.</small></span></label>
+                <button className="finish" disabled={customerSaving || !customerName.trim()} onClick={() => void registerBlingCustomer()}>{customerSaving ? 'Salvando…' : programConsent ? 'Cadastrar no Bling + Fidelizei' : 'Cadastrar no Bling'}</button>
+              </div>
             </div>
           </section>}
           <label>Cupom Fidelizei<div className="row"><input disabled={!loyaltyCustomer} value={coupon} onChange={e => setCoupon(e.target.value.toUpperCase())} placeholder={loyaltyCustomer ? 'Digite o código do cupom' : 'Disponível para clientes Fidelizei'} /><button disabled={!loyaltyCustomer || !coupon} onClick={applyCoupon}>Aplicar cupom</button></div></label>
