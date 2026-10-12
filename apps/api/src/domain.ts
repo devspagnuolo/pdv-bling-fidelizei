@@ -24,6 +24,9 @@ export type FidelizeiCustomer = {
   points: number;
   benefits: string[];
   coupons: Coupon[];
+  welcomeEmailSent?: boolean;
+  temporaryPasswordSent?: boolean;
+  onboardingMessage?: string;
 };
 export type LookupStatus = 'FOUND' | 'NOT_FOUND' | 'UNAVAILABLE';
 export type Customer = {
