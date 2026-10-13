@@ -90,6 +90,24 @@ const lookupCustomer = async (cpf: string): Promise<Customer> => {
   };
 };
 
+const onlyDigits = (value?: string) => (value ?? '').replace(/\D/g, '');
+// O cliente já vinculado a um pedido só muda por escolha explícita: omitir o CPF, uma consulta
+// indisponível ou uma integração fora do ar não podem desvincular o cliente (nem trocar o
+// contato do pedido no Bling para Consumidor Final).
+const resolveDraftCustomer = async (current: Customer | undefined, body: { customerCpf?: string; clearCustomer?: boolean }) => {
+  if (body.clearCustomer === true) return undefined;
+  if (!body.customerCpf) return current;
+  const sameCustomer = Boolean(current) && onlyDigits(current?.cpf) === onlyDigits(body.customerCpf);
+  const fresh = await lookupCustomer(body.customerCpf);
+  if (!fresh.found) return sameCustomer ? current : undefined;
+  if (!sameCustomer || !current) return fresh;
+  return {
+    ...fresh,
+    bling: fresh.bling ?? (fresh.systems.bling === 'UNAVAILABLE' ? current.bling : undefined),
+    fidelizei: fresh.fidelizei ?? (fresh.systems.fidelizei === 'UNAVAILABLE' ? current.fidelizei : undefined)
+  };
+};
+
 await initializeDatabase();
 registerBlingWebhooks(app);
 void bling.syncProducts().catch(error => app.log.error(error, 'Falha na sincronização inicial do catálogo Bling'));
@@ -711,37 +729,40 @@ app.put('/sales/:id', async (req) => {
   const sale = await getSale((req.params as { id: string }).id);
   if (!sale) return badRequest('Venda em atendimento não encontrada');
   if (sale.status !== 'OPEN') return conflict('Somente vendas em atendimento podem ser atualizadas');
-  const body = req.body as { sellerId?: string; categoryId?: string; items?: SaleItem[]; customerCpf?: string; manualDiscount?: number; freight?: number; observations?: string; emitFiscal?: boolean };
+  const body = req.body as { sellerId?: string; categoryId?: string; items?: SaleItem[]; customerCpf?: string; clearCustomer?: boolean; manualDiscount?: number; freight?: number; observations?: string; emitFiscal?: boolean };
   if (!body.items?.length) return badRequest('Adicione ao menos um produto');
   const session = await cashSessionById(sale.cashSessionId);
   if (!session || session.status !== 'OPEN') return badRequest('O caixa desta venda não está mais aberto');
   const items = await canonicalSaleItems(body.items);
-  const lookup = body.customerCpf ? await lookupCustomer(body.customerCpf) : undefined;
+  const customer = await resolveDraftCustomer(sale.customer, body);
   const categories = await bling.financialCategories();
   const category = categories.find(item => item.id === body.categoryId) ?? categories.find(item => item.id === sale.categoryId);
   if (!category) return badRequest('A categoria financeira da venda não foi encontrada no Bling');
   const manualDiscount = money(Math.max(0, Number(body.manualDiscount) || 0));
   const freight = money(Math.max(0, Number(body.freight) || 0));
-  Object.assign(sale, {
+  // Trabalha numa cópia: se o Bling recusar a atualização, o pedido guardado não fica com
+  // alterações pela metade, e nada vaza para as próximas operações deste (ou de outro) pedido.
+  const draft: Sale = { ...sale };
+  Object.assign(draft, {
     sellerId: body.sellerId || sale.sellerId,
     categoryId: category.id,
     categoryName: category.name,
-    customer: lookup?.found ? lookup : undefined,
+    customer,
     items,
     manualDiscount,
     observations: body.observations?.trim().slice(0, 2000) || undefined,
     emitFiscal: body.emitFiscal === true,
     ...calculate(items, manualDiscount + (sale.coupon?.discount ?? 0), freight)
   });
-  sale.freight = freight;
-  sale.blingDraftStatusId ??= await bling.findInServiceStatusId();
-  const order = sale.blingOrderId
-    ? await bling.updateOrder(sale.blingOrderId, blingOrderInput(sale, session, []))
-    : await bling.createOrder(blingOrderInput(sale, session, []));
-  sale.blingOrderId = order.id;
-  sale.blingOrderNumber = order.number ?? sale.blingOrderNumber;
-  await persist(sale);
-  return sale;
+  draft.freight = freight;
+  draft.blingDraftStatusId ??= await bling.findInServiceStatusId();
+  const order = draft.blingOrderId
+    ? await bling.updateOrder(draft.blingOrderId, blingOrderInput(draft, session, []))
+    : await bling.createOrder(blingOrderInput(draft, session, []));
+  draft.blingOrderId = order.id;
+  draft.blingOrderNumber = order.number ?? draft.blingOrderNumber;
+  await persist(draft);
+  return draft;
 });
 app.get('/sales/open', async (req) => {
   const cashSessionId = String((req.query as { cashSessionId?: string }).cashSessionId ?? '');
