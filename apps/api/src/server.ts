@@ -29,10 +29,7 @@ const allowedOrigins = new Set([
   'http://127.0.0.1:5173'
 ].filter((value): value is string => Boolean(value)));
 await app.register(cors, {
-  origin: (origin, callback) => callback(null, !origin || allowedOrigins.has(origin)),
-  // O padrão do @fastify/cors libera só GET, HEAD e POST. Sem listar PUT/PATCH/DELETE o navegador
-  // bloqueia o preflight e a chamada falha com "Failed to fetch" (ex.: PUT /sales/:id e DELETE /cash/sessions/:id).
-  methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']
+  origin: (origin, callback) => callback(null, !origin || allowedOrigins.has(origin))
 });
 const loginAttempts = new Map<string, { count: number; resetAt: number }>();
 app.addHook('preHandler', async (req, reply) => {
@@ -90,24 +87,6 @@ const lookupCustomer = async (cpf: string): Promise<Customer> => {
   };
 };
 
-const onlyDigits = (value?: string) => (value ?? '').replace(/\D/g, '');
-// O cliente já vinculado a um pedido só muda por escolha explícita: omitir o CPF, uma consulta
-// indisponível ou uma integração fora do ar não podem desvincular o cliente (nem trocar o
-// contato do pedido no Bling para Consumidor Final).
-const resolveDraftCustomer = async (current: Customer | undefined, body: { customerCpf?: string; clearCustomer?: boolean }) => {
-  if (body.clearCustomer === true) return undefined;
-  if (!body.customerCpf) return current;
-  const sameCustomer = Boolean(current) && onlyDigits(current?.cpf) === onlyDigits(body.customerCpf);
-  const fresh = await lookupCustomer(body.customerCpf);
-  if (!fresh.found) return sameCustomer ? current : undefined;
-  if (!sameCustomer || !current) return fresh;
-  return {
-    ...fresh,
-    bling: fresh.bling ?? (fresh.systems.bling === 'UNAVAILABLE' ? current.bling : undefined),
-    fidelizei: fresh.fidelizei ?? (fresh.systems.fidelizei === 'UNAVAILABLE' ? current.fidelizei : undefined)
-  };
-};
-
 await initializeDatabase();
 registerBlingWebhooks(app);
 void bling.syncProducts().catch(error => app.log.error(error, 'Falha na sincronização inicial do catálogo Bling'));
@@ -143,7 +122,7 @@ app.get('/health', async (_req, reply) => {
       pendingSales = pending.rows[0]?.count ?? 0;
     }
   } catch (error) {
-    app.log.error({ err: error }, 'Health check do banco falhou');
+    app.log.error({ error }, 'Health check do banco falhou');
   }
   const blingStatus = await getBlingConnectionStatus();
   const ok = database || !pool;
@@ -467,44 +446,21 @@ app.post('/cash/sessions/:id/reopen', async (req) => {
   const session = await cashSessionById(id);
   if (!session) return badRequest('Caixa não encontrado');
   if (session.status === 'OPEN') return { reopened: true, session, idempotent: true };
-  // Cada operador só pode ter um caixa aberto. Em vez de uma recusa genérica, informamos
-  // qual caixa precisa ser fechado para que a reabertura possa acontecer.
-  const alreadyOpen = await currentCashSession(session.operatorId);
-  if (alreadyOpen) {
-    const openedAt = new Date(alreadyOpen.openedAt).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
-    return conflict(`Este operador já tem outro caixa aberto (${alreadyOpen.channelName ?? 'Configuração padrão'}, desde ${openedAt}). Feche esse caixa antes de reabrir este.`);
-  }
-  // Uma única instrução atômica: reabre somente se ainda estiver fechado e registra o evento,
-  // guardando o fechamento anterior para auditoria (o resumo é limpo ao reabrir).
-  let reopenedRows: unknown[];
+  if (await currentCashSession(session.operatorId)) return badRequest('O operador já possui outro caixa aberto');
+  await database.query('begin');
   try {
-    const result = await database.query(
-      `with previous as (
-         select id, closed_at, closing_summary from pdv_cash_sessions where id=$1 and status='CLOSED'
-       ), reopened as (
-         update pdv_cash_sessions set status='OPEN', closed_at=null, closing_summary=null
-         where id=$1 and status='CLOSED'
-         returning id
-       )
-       insert into pdv_cash_operations (id, session_id, operation_type, amount, data)
-       select $2::uuid, reopened.id, 'REOPENING', 0,
-         jsonb_build_object('syncStatus', 'NOT_REQUIRED', 'controlOnly', true,
-           'previousClosedAt', previous.closed_at, 'previousClosingSummary', previous.closing_summary)
-       from reopened join previous on previous.id = reopened.id
-       returning id`,
-      [id, randomUUID()]
-    ) as { rows: unknown[] };
-    reopenedRows = result.rows;
+    await database.query(`update pdv_cash_sessions set status='OPEN', closed_at=null, closing_summary=null where id=$1`, [id]);
+    await database.query(
+      `insert into pdv_cash_operations (id, session_id, operation_type, amount, data)
+       values ($1,$2,'REOPENING',0,$3::jsonb)`,
+      [randomUUID(), id, JSON.stringify({ syncStatus: 'NOT_REQUIRED', controlOnly: true })]
+    );
+    await database.query('commit');
   } catch (error) {
-    // Corrida com outra abertura do mesmo operador: o índice único de caixa aberto impede duplicidade.
-    if ((error as { code?: string }).code === '23505') {
-      return conflict('Este operador acabou de abrir outro caixa. Feche esse caixa antes de reabrir este.');
-    }
+    await database.query('rollback');
     throw error;
   }
-  const reopened = await cashSessionById(id);
-  if (!reopenedRows.length && reopened?.status !== 'OPEN') return conflict('Não foi possível reabrir este caixa. Atualize a lista e tente novamente.');
-  return { reopened: true, session: reopened };
+  return { reopened: true, session: await cashSessionById(id) };
 });
 app.delete('/cash/sessions/:id', async (req, reply) => {
   const id = (req.params as { id: string }).id;
@@ -682,6 +638,8 @@ app.post('/sales', async (req) => {
     freight?: number;
     observations?: string;
     emitFiscal?: boolean;
+    payments?: PaymentSplit[];
+    draftStep?: Sale['draftStep'];
   };
   const operatorId = principalFromRequest(req)?.operatorId ?? body.operatorId;
   if (!body.cashSessionId || !operatorId || !body.sellerId || !body.items?.length) {
@@ -714,6 +672,14 @@ app.post('/sales', async (req) => {
     manualDiscount,
     observations: body.observations?.trim().slice(0, 2000) || undefined,
     emitFiscal: body.emitFiscal === true,
+    payments: Array.isArray(body.payments) ? body.payments.map(payment => ({
+      paymentMethodId: String(payment.paymentMethodId ?? ''),
+      paymentMethodName: payment.paymentMethodName,
+      amount: money(Math.max(0, Number(payment.amount) || 0)),
+      receivedAmount: payment.receivedAmount === undefined ? undefined : money(Math.max(0, Number(payment.receivedAmount) || 0))
+    })).filter(payment => payment.paymentMethodId) : [],
+    draftStep: ['product', 'customer', 'payment'].includes(body.draftStep ?? '') ? body.draftStep : 'product',
+    draftSyncStatus: 'SYNCED',
     fiscalStatus: body.emitFiscal === true ? undefined : 'NOT_REQUESTED',
     ...amounts,
     createdAt: new Date().toISOString()
@@ -729,40 +695,55 @@ app.put('/sales/:id', async (req) => {
   const sale = await getSale((req.params as { id: string }).id);
   if (!sale) return badRequest('Venda em atendimento não encontrada');
   if (sale.status !== 'OPEN') return conflict('Somente vendas em atendimento podem ser atualizadas');
-  const body = req.body as { sellerId?: string; categoryId?: string; items?: SaleItem[]; customerCpf?: string; clearCustomer?: boolean; manualDiscount?: number; freight?: number; observations?: string; emitFiscal?: boolean };
+  const body = req.body as { sellerId?: string; categoryId?: string; items?: SaleItem[]; customerCpf?: string; manualDiscount?: number; freight?: number; observations?: string; emitFiscal?: boolean; payments?: PaymentSplit[]; draftStep?: Sale['draftStep'] };
   if (!body.items?.length) return badRequest('Adicione ao menos um produto');
   const session = await cashSessionById(sale.cashSessionId);
   if (!session || session.status !== 'OPEN') return badRequest('O caixa desta venda não está mais aberto');
   const items = await canonicalSaleItems(body.items);
-  const customer = await resolveDraftCustomer(sale.customer, body);
+  const lookup = body.customerCpf ? await lookupCustomer(body.customerCpf) : undefined;
   const categories = await bling.financialCategories();
   const category = categories.find(item => item.id === body.categoryId) ?? categories.find(item => item.id === sale.categoryId);
   if (!category) return badRequest('A categoria financeira da venda não foi encontrada no Bling');
   const manualDiscount = money(Math.max(0, Number(body.manualDiscount) || 0));
   const freight = money(Math.max(0, Number(body.freight) || 0));
-  // Trabalha numa cópia: se o Bling recusar a atualização, o pedido guardado não fica com
-  // alterações pela metade, e nada vaza para as próximas operações deste (ou de outro) pedido.
-  const draft: Sale = { ...sale };
-  Object.assign(draft, {
+  Object.assign(sale, {
     sellerId: body.sellerId || sale.sellerId,
     categoryId: category.id,
     categoryName: category.name,
-    customer,
+    customer: lookup?.found ? lookup : undefined,
     items,
     manualDiscount,
     observations: body.observations?.trim().slice(0, 2000) || undefined,
     emitFiscal: body.emitFiscal === true,
+    payments: Array.isArray(body.payments) ? body.payments.map(payment => ({
+      paymentMethodId: String(payment.paymentMethodId ?? ''),
+      paymentMethodName: payment.paymentMethodName,
+      amount: money(Math.max(0, Number(payment.amount) || 0)),
+      receivedAmount: payment.receivedAmount === undefined ? undefined : money(Math.max(0, Number(payment.receivedAmount) || 0))
+    })).filter(payment => payment.paymentMethodId) : sale.payments ?? [],
+    draftStep: ['product', 'customer', 'payment'].includes(body.draftStep ?? '') ? body.draftStep : sale.draftStep ?? 'product',
     ...calculate(items, manualDiscount + (sale.coupon?.discount ?? 0), freight)
   });
-  draft.freight = freight;
-  draft.blingDraftStatusId ??= await bling.findInServiceStatusId();
-  const order = draft.blingOrderId
-    ? await bling.updateOrder(draft.blingOrderId, blingOrderInput(draft, session, []))
-    : await bling.createOrder(blingOrderInput(draft, session, []));
-  draft.blingOrderId = order.id;
-  draft.blingOrderNumber = order.number ?? draft.blingOrderNumber;
-  await persist(draft);
-  return draft;
+  sale.freight = freight;
+  sale.blingDraftStatusId ??= await bling.findInServiceStatusId();
+  // O rascunho local é a fonte de verdade da tela. Assim, uma rejeição temporária
+  // do Bling nunca mistura nem apaga o estado de outro pedido durante a troca.
+  await persist(sale);
+  try {
+    const order = sale.blingOrderId
+      ? await bling.updateOrder(sale.blingOrderId, blingOrderInput(sale, session, []))
+      : await bling.createOrder(blingOrderInput(sale, session, []));
+    sale.blingOrderId = order.id;
+    sale.blingOrderNumber = order.number ?? sale.blingOrderNumber;
+    sale.draftSyncStatus = 'SYNCED';
+    sale.draftSyncError = undefined;
+  } catch (error) {
+    sale.draftSyncStatus = 'PENDING';
+    sale.draftSyncError = error instanceof Error ? error.message.slice(0, 700) : 'Falha ao atualizar o rascunho no Bling';
+    app.log.warn({ error, saleId: sale.id, blingOrderId: sale.blingOrderId }, 'Rascunho salvo no PDV e pendente de atualização no Bling');
+  }
+  await persist(sale);
+  return sale;
 });
 app.get('/sales/open', async (req) => {
   const cashSessionId = String((req.query as { cashSessionId?: string }).cashSessionId ?? '');
@@ -881,7 +862,7 @@ app.post('/sales/:id/complete', async (req) => {
       sale.blingFulfillment = await bling.finalizeOrder(order.id);
     } catch (error) {
       fulfillmentError = error instanceof Error ? error.message.slice(0, 500) : 'Falha ao lançar contas, estoque ou marcar o pedido como atendido';
-      app.log.error({ err: error, saleId: sale.id, blingOrderId: order.id }, 'Pedido criado, mas a finalização automática do Bling exige conferência');
+      app.log.error({ error, saleId: sale.id, blingOrderId: order.id }, 'Pedido criado, mas a finalização automática do Bling exige conferência');
     }
     if (pool) await pool.query(
       `update bling_products product set stock=product.stock-item.quantity
@@ -896,7 +877,7 @@ app.post('/sales/:id/complete', async (req) => {
         sale.fiscalDocumentUrl = fiscal.documentUrl;
       } catch (error) {
         sale.fiscalStatus = 'FAILED';
-        app.log.error({ err: error, saleId: sale.id, blingOrderId: order.id }, 'Pedido criado, mas a NFC-e não foi gerada no Bling');
+        app.log.error({ error, saleId: sale.id, blingOrderId: order.id }, 'Pedido criado, mas a NFC-e não foi gerada no Bling');
       }
     }
     // O Fidelizei credita os pontos ao processar o pedido do Bling. O PDV somente
