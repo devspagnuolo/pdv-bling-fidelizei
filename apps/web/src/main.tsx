@@ -859,6 +859,11 @@ function App() {
     finally { setOperationBusy(false); }
   };
   const openOperation = (type: OperationModal) => {
+    if (type === 'control' && authRole !== 'MANAGER') {
+      setMenuOpen(false);
+      setMessage('O Controle de caixa é um relatório exclusivo da gerência.');
+      return;
+    }
     setMenuOpen(false);
     setOperationAmount('');
     setOperationNotes('');
@@ -996,7 +1001,7 @@ function App() {
             <button disabled={!cashSession} onClick={() => openOperation('withdrawal')}><span>↘</span><div>Sangria<small>Registra débito em Caixas e Bancos</small></div></button>
             <button disabled={!cashSession} onClick={() => openOperation('supply')}><span>↗</span><div>Suprimento<small>Registra crédito em Caixas e Bancos</small></div></button>
             <button disabled={!cashSession} onClick={() => openOperation('close')}><span>□</span><div>Fechar caixa<small>Conferir o movimento do dia</small></div></button>
-            <button onClick={() => openOperation('control')}><span>▥</span><div>Controle de caixa<small>Histórico, relatórios e ajustes</small></div></button>
+            {authRole === 'MANAGER' && <button onClick={() => openOperation('control')}><span>▥</span><div>Controle de caixa<small>Relatório exclusivo da gerência</small></div></button>}
             <button onClick={() => openOperation('orders')}><span>☷</span><div>Pedidos do PDV<small>Consultar, conferir e excluir no Bling</small></div></button>
             <button onClick={() => printReceipt()} disabled={!sale?.blingOrderId}><span>▣</span><div>Imprimir<small>Comprovante da venda atual</small></div></button>
             <button onClick={() => void reprintLast()}><span>▤</span><div>Reimprimir última operação<small>Busca a última venda concluída</small></div></button>
@@ -1253,12 +1258,12 @@ function App() {
                 <span>{session.salesCount ?? 0}</span>
                 <b>{brl.format(session.salesTotal ?? 0)}</b>
                 <span className={session.status === 'OPEN' ? 'status-open' : 'status-closed'}>{session.status === 'OPEN' ? 'Aberto' : 'Fechado'}</span>
-                <span className="row-actions"><button onClick={() => void loadCashControl(session.id)}>Relatório</button>{session.status === 'CLOSED' && <button onClick={() => void reopenCash(session)}>Reabrir</button>}<button className="danger-action" onClick={() => void deleteCash(session)}>Excluir</button></span>
+                <span className="row-actions"><button onClick={() => void loadCashControl(session.id)}>Ver relatório</button></span>
               </div>)}
               {!cashSessions.length && <div className="empty-state compact">{operationBusy ? 'Carregando caixas…' : 'Nenhum caixa encontrado no período.'}</div>}
             </div>
           </> : <>
-            <div className="report-toolbar"><button className="secondary" onClick={() => setCashControl(undefined)}>← Voltar aos caixas</button><span className={cashControl.session.status === 'OPEN' ? 'status-open' : 'status-closed'}>{cashControl.session.status === 'OPEN' ? 'Caixa aberto' : 'Caixa fechado'}</span>{cashControl.session.status === 'CLOSED' && <button onClick={() => void reopenCash(cashControl.session)}>Reabrir caixa</button>}<button className="danger-action" onClick={() => void deleteCash(cashControl.session)}>Excluir caixa</button></div>
+            <div className="report-toolbar"><button className="secondary" onClick={() => setCashControl(undefined)}>← Voltar aos caixas</button><span className={cashControl.session.status === 'OPEN' ? 'status-open' : 'status-closed'}>{cashControl.session.status === 'OPEN' ? 'Caixa aberto' : 'Caixa fechado'}</span><span className="muted">Somente consulta</span></div>
             <div className="operation-account"><span>{cashControl.session.channelName ?? 'Loja do Bling'} · {cashControl.session.businessUnitName ?? 'Unidade de negócio'}<small>Abertura: {new Date(cashControl.session.openedAt).toLocaleString('pt-BR')}{cashControl.session.closedAt ? ` · Fechamento: ${new Date(cashControl.session.closedAt).toLocaleString('pt-BR')}` : ''}</small></span><b>{sellers.find(item => item.id === cashControl.session.sellerId)?.name ?? cashControl.session.operatorId}</b></div>
             <div className="closing-summary">
               <div><small>Saldo inicial</small><b>{brl.format(cashControl.session.openingAmount)}</b></div>
