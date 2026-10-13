@@ -460,12 +460,24 @@ const generateNfce = async (orderId: string) => {
   }
   return { status: 'REQUESTED' as const, fiscalId, documentUrl };
 };
+// Resume o corpo de erro do Bling em texto legível (mensagem, descrição e cada campo recusado).
+const describeBlingError = (raw: string) => {
+  try {
+    const parsed = JSON.parse(raw) as { error?: { message?: string; description?: string; fields?: { msg?: string; element?: unknown }[] } };
+    const error = parsed.error;
+    if (!error) return raw;
+    const fields = (error.fields ?? []).map(field => field.msg).filter(Boolean).join('; ');
+    return [error.message, error.description, fields].filter(Boolean).join(' — ');
+  } catch {
+    return raw;
+  }
+};
 const blingFailure = async (response: Response, operation: string): Promise<never> => {
   const detail = await response.text();
   const reconnect = response.status === 401 || response.status === 403
     ? ' Reconecte o aplicativo autorizando Contas Financeiras e Caixas e Bancos.'
     : '';
-  throw new Error(`Bling: ${operation} falhou (HTTP ${response.status}).${reconnect}${detail ? ` ${detail.slice(0, 240)}` : ''}`);
+  throw new Error(`Bling: ${operation} falhou (HTTP ${response.status}).${reconnect}${detail ? ` ${describeBlingError(detail).slice(0, 900)}` : ''}`);
 };
 
 let accountsCache: { expires: number; data: { id: string; name: string; type: string; active: boolean }[] } | undefined;
