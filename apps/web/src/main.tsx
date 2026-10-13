@@ -512,7 +512,7 @@ function App() {
     setReceipt(undefined);
     clearCustomerRef.current = false;
   };
-  const snapshotOrder = () => {
+  const snapshotOrder = (unsaved = false) => {
     if (!cashSession) return;
     const key = activeSaleRef.current?.id ?? 'new';
     const snapshots = readOrderSnapshots(cashSession.id);
@@ -521,7 +521,7 @@ function App() {
     if (hasContent) {
       snapshots[key] = {
         items, cpf, customer, customerName, customerPhone, customerEmail, fidelizeiPhone, fidelizeiEmail, programConsent,
-        coupon, discountMode, discountInput, freightInput, observations, seller, categoryId, emitFiscal, payments, step
+        coupon, discountMode, discountInput, freightInput, observations, seller, categoryId, emitFiscal, payments, step, unsaved
       };
     } else delete snapshots[key];
     writeOrderSnapshots(cashSession.id, snapshots);
@@ -568,8 +568,8 @@ function App() {
   const startNewSale = async () => {
     const leavingSaved = Boolean(activeSaleRef.current);
     // O pedido atual fica gravado em atendimento antes de abrir um novo.
-    if (leavingSaved && items.length) await saveDraft(items);
-    if (leavingSaved) snapshotOrder();
+    const saveFailed = leavingSaved && items.length > 0 && !(await saveDraft(items));
+    if (leavingSaved) snapshotOrder(saveFailed);
     newSale();
     // Se havia um pedido novo ainda não gravado (deixado ao retomar outro), ele volta como estava.
     const pending = leavingSaved ? takeSnapshot('new') : undefined;
@@ -656,16 +656,11 @@ function App() {
   };
   const switchToSale = async (draft: any) => {
     if (activeSaleRef.current?.id === draft.id) { setOperationModal(undefined); return; }
-    // Grava o pedido atual antes de trocar. Se o salvamento falhar, fica nele para não perder nada.
-    if (activeSaleRef.current && items.length) {
-      const saved = await saveDraft(items);
-      if (!saved) {
-        snapshotOrder();
-        setMessage(current => `Não foi possível salvar o pedido atual; ele foi mantido na tela. ${current}`.trim());
-        return;
-      }
-    }
-    snapshotOrder();
+    // Grava o pedido atual antes de trocar. Se o Bling recusar, o pedido fica guardado neste navegador
+    // (com os itens e campos como estão) e volta igual ao retomá-lo, sem impedir a troca.
+    let saveFailed = false;
+    if (activeSaleRef.current && items.length) saveFailed = !(await saveDraft(items));
+    snapshotOrder(saveFailed);
     // A lista de pedidos pode estar desatualizada: busca a versão mais recente do pedido a retomar.
     let latest = draft;
     try {
@@ -677,10 +672,11 @@ function App() {
       void loadOrders();
       return;
     }
-    resumeSale(latest);
+    const failureMessage = saveFailed ? 'O pedido anterior não pôde ser salvo no Bling e foi guardado neste navegador; ao retomá-lo, tente salvar de novo.' : undefined;
+    resumeSale(latest, failureMessage);
     // Reaplica o que estava na tela deste pedido (cupom digitado, pagamentos, campos não gravados).
     const local = takeSnapshot(draft.id);
-    if (local) applySnapshot(local, false);
+    if (local) applySnapshot(local, local.unsaved === true);
   };
   // Ao entrar ou atualizar a tela, volta para o pedido (e o cliente) que estavam em edição.
   useEffect(() => {
