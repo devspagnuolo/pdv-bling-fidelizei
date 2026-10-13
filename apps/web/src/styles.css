@@ -769,3 +769,14 @@ main{padding:12px 16px;max-width:1680px;margin:0 auto}
 
 /* Avisos do PDV precisam ficar acima das janelas de operação (caixa, pedidos, etc.) */
 .message { z-index: 120; }
+
+/* Tela de login do operador na entrada do PDV */
+.login-screen { display: grid; min-height: 100vh; place-items: center; padding: 24px; }
+.login-card { display: grid; gap: 16px; width: min(420px, 100%); padding: 28px; border: 1px solid var(--line, #e7e1d8); border-radius: 22px; background: #fff; box-shadow: 0 30px 70px -40px rgba(23, 23, 27, .5); }
+.login-brand { display: grid; place-items: center; padding: 16px; border-radius: 16px; background: #131316; }
+.login-brand .vivi-logo { width: 170px; height: auto; max-height: 62px; }
+.login-heading { display: grid; gap: 4px; }
+.login-heading h1 { margin: 0; font-size: 26px; }
+.login-heading p, .login-hint { margin: 0; color: var(--muted, #716d67); font-size: 13px; line-height: 1.45; }
+.login-card label { display: grid; gap: 7px; margin: 0; font-weight: 700; font-size: 13px; }
+.login-card .message { position: static; margin: 0; }

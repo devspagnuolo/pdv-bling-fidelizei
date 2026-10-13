@@ -908,7 +908,6 @@ function App() {
       setCashSession(undefined);
       setDayHistory(undefined);
       setMessage('Caixa fechado. O saldo final permaneceu somente no controle interno e não gerou movimento financeiro no Bling.');
-      logout();
     } catch (error) { setMessage(error instanceof Error ? error.message : 'Falha ao fechar o caixa.'); }
     finally { setOperationBusy(false); }
   };
@@ -955,11 +954,32 @@ function App() {
     finally { setOperationBusy(false); }
   };
 
+  // O operador precisa se identificar ao acessar o PDV. Só depois disso o caixa em aberto dele é
+  // carregado e a abertura (ou reabertura) de caixa fica disponível.
+  if (!authToken && authEnabled !== false) {
+    return <main className="login-screen">
+      <section className="login-card" aria-labelledby="login-title">
+        <div className="login-brand"><img className="vivi-logo" src="/vivi-logo-original.png" alt="Vivi Moda Plus Size" /></div>
+        <div className="login-heading"><small>VIVI MODA · CAIXA 01</small><h1 id="login-title">Entrar no PDV</h1><p>Identifique o operador para acessar a frente de caixa.</p></div>
+        {authEnabled === undefined ? <p className="login-hint" role="status">Conectando ao servidor…</p> : <>
+          <label>Operador<select value={loginOperator} onChange={event => setLoginOperator(event.target.value)}>
+            <option value="">{sellers.length ? 'Selecione' : 'Carregando operadores do Bling…'}</option>
+            {sellers.map(item => <option value={item.id} key={item.id}>{item.name}</option>)}
+          </select></label>
+          <label>PIN<input type="password" inputMode="numeric" autoComplete="current-password" value={loginPin} onChange={event => setLoginPin(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') void login(); }} /></label>
+          <button className="finish" disabled={loginBusy || !loginOperator || !loginPin} onClick={() => void login()}>{loginBusy ? 'Validando…' : 'Entrar'}</button>
+          {!sellers.length && <p className="login-hint">Se os operadores não aparecerem, confira a conexão com o Bling.</p>}
+          {message && <p className="message" role="alert">{message}</p>}
+        </>}
+      </section>
+    </main>;
+  }
+
   return <main>
     <header className="pos-header">
       <div className="brand-block"><img className="vivi-logo" src="/vivi-logo-original.png" alt="Vivi Moda Plus Size" /><div><small>VIVI MODA · CAIXA 01</small><h1>Frente de caixa</h1><p>Venda integrada ao Bling e Fidelizei</p></div></div>
       <div className="header-actions">
-        {authEnabled ? <div className="operator-select authenticated-operator"><span>Operador</span><b>{operatorName || 'Definido na abertura'}</b><small>{authToken ? authRole === 'MANAGER' ? 'Gerente' : 'Operador' : 'Caixa fechado'}</small>{authToken && <button onClick={logout}>Sair</button>}</div> : <label className="operator-select"><span>Operador</span><select value={operatorId} onChange={e => setOperatorId(e.target.value)}>
+        {authEnabled ? <div className="operator-select authenticated-operator"><span>Operador</span><b>{operatorName}</b><small>{authRole === 'MANAGER' ? 'Gerente' : 'Operador'}</small>{authToken && <button onClick={logout}>Sair</button>}</div> : <label className="operator-select"><span>Operador</span><select value={operatorId} onChange={e => setOperatorId(e.target.value)}>
           <option value="">Selecione no Bling</option>{sellers.map(s => <option value={s.id} key={s.id}>{s.name}</option>)}
         </select></label>}
         <div className="operations-wrap">
