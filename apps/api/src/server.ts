@@ -29,7 +29,9 @@ const allowedOrigins = new Set([
   'http://127.0.0.1:5173'
 ].filter((value): value is string => Boolean(value)));
 await app.register(cors, {
-  origin: (origin, callback) => callback(null, !origin || allowedOrigins.has(origin))
+  origin: (origin, callback) => callback(null, !origin || allowedOrigins.has(origin)),
+  methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['authorization', 'content-type']
 });
 const loginAttempts = new Map<string, { count: number; resetAt: number }>();
 app.addHook('preHandler', async (req, reply) => {
