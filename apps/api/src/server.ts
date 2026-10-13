@@ -287,6 +287,7 @@ app.get('/cash/configuration', async () => {
   return { accounts, channels };
 });
 app.get('/cash/sessions', async (req) => {
+  requireManager(req);
   const query = req.query as { from?: string; to?: string; status?: string; search?: string; limit?: string };
   const database = requireDatabase();
   const values: unknown[] = [];
@@ -415,6 +416,7 @@ app.get('/cash/day', async (req) => {
   };
 });
 app.get('/cash/control', async (req) => {
+  requireManager(req);
   const query = req.query as { sessionId?: string };
   if (!query.sessionId) return badRequest('Informe a sessão de caixa');
   const snapshot = await cashSessionSnapshot(query.sessionId);
@@ -443,6 +445,7 @@ app.get('/cash/control', async (req) => {
   };
 });
 app.post('/cash/sessions/:id/reopen', async (req) => {
+  requireManager(req);
   const id = (req.params as { id: string }).id;
   const database = requireDatabase();
   const session = await cashSessionById(id);
@@ -465,6 +468,7 @@ app.post('/cash/sessions/:id/reopen', async (req) => {
   return { reopened: true, session: await cashSessionById(id) };
 });
 app.delete('/cash/sessions/:id', async (req, reply) => {
+  requireManager(req);
   const id = (req.params as { id: string }).id;
   const database = requireDatabase();
   const session = await cashSessionById(id);
