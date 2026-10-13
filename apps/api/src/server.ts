@@ -29,7 +29,10 @@ const allowedOrigins = new Set([
   'http://127.0.0.1:5173'
 ].filter((value): value is string => Boolean(value)));
 await app.register(cors, {
-  origin: (origin, callback) => callback(null, !origin || allowedOrigins.has(origin))
+  origin: (origin, callback) => callback(null, !origin || allowedOrigins.has(origin)),
+  // O padrão do @fastify/cors libera só GET, HEAD e POST. Sem listar PUT/PATCH/DELETE o navegador
+  // bloqueia o preflight e a chamada falha com "Failed to fetch" (ex.: PUT /sales/:id e DELETE /cash/sessions/:id).
+  methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']
 });
 const loginAttempts = new Map<string, { count: number; resetAt: number }>();
 app.addHook('preHandler', async (req, reply) => {
