@@ -74,6 +74,18 @@ const writeWorkingOrder = (cashSessionId: string, value: { saleId?: string; cpf?
     else sessionStorage.removeItem(workingOrderKey(cashSessionId));
   } catch { /* armazenamento indisponível: o pedido continua salvo no servidor */ }
 };
+// Rascunho local de cada pedido na tela (por caixa). Guarda também o que o servidor não persiste
+// (cupom digitado, pagamentos, consentimento) e protege o pedido caso o salvamento falhe ao trocar.
+const orderSnapshotsKey = (cashSessionId: string) => `pdv-order-snapshots:${cashSessionId}`;
+const readOrderSnapshots = (cashSessionId: string): Record<string, any> => {
+  try { return JSON.parse(sessionStorage.getItem(orderSnapshotsKey(cashSessionId)) ?? '{}'); } catch { return {}; }
+};
+const writeOrderSnapshots = (cashSessionId: string, value: Record<string, any>) => {
+  try {
+    if (Object.keys(value).length) sessionStorage.setItem(orderSnapshotsKey(cashSessionId), JSON.stringify(value));
+    else sessionStorage.removeItem(orderSnapshotsKey(cashSessionId));
+  } catch { /* armazenamento indisponível: vale o que está salvo no servidor */ }
+};
 const brl = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' });
 const localDate = () => new Date().toLocaleDateString('sv-SE');
 const storeReceipt = {
@@ -491,6 +503,48 @@ function App() {
     setReceipt(undefined);
     clearCustomerRef.current = false;
   };
+  const snapshotOrder = () => {
+    if (!cashSession) return;
+    const key = activeSaleRef.current?.id ?? 'new';
+    const snapshots = readOrderSnapshots(cashSession.id);
+    const hasContent = items.length > 0 || customer?.found || Boolean(coupon) || Number(discountInput.replace(',', '.')) > 0
+      || Number(freightInput.replace(',', '.')) > 0 || Boolean(observations.trim());
+    if (hasContent) {
+      snapshots[key] = {
+        items, cpf, customer, customerName, customerPhone, customerEmail, fidelizeiPhone, fidelizeiEmail, programConsent,
+        coupon, discountMode, discountInput, freightInput, observations, seller, categoryId, emitFiscal, payments, step
+      };
+    } else delete snapshots[key];
+    writeOrderSnapshots(cashSession.id, snapshots);
+  };
+  const takeSnapshot = (key: string) => {
+    if (!cashSession) return undefined;
+    const snapshots = readOrderSnapshots(cashSession.id);
+    const snapshot = snapshots[key];
+    if (snapshot) { delete snapshots[key]; writeOrderSnapshots(cashSession.id, snapshots); }
+    return snapshot;
+  };
+  const applySnapshot = (snapshot: any, includeItems: boolean) => {
+    if (includeItems && Array.isArray(snapshot.items)) setItems(snapshot.items);
+    if (snapshot.customer) setCustomer(snapshot.customer);
+    setCpf(snapshot.cpf ?? '');
+    setCustomerName(snapshot.customerName ?? '');
+    setCustomerPhone(snapshot.customerPhone ?? '');
+    setCustomerEmail(snapshot.customerEmail ?? '');
+    setFidelizeiPhone(snapshot.fidelizeiPhone ?? '');
+    setFidelizeiEmail(snapshot.fidelizeiEmail ?? '');
+    setProgramConsent(snapshot.programConsent === true);
+    if (snapshot.coupon) setCoupon(snapshot.coupon);
+    setDiscountMode(snapshot.discountMode === 'percent' ? 'percent' : 'value');
+    setDiscountInput(snapshot.discountInput ?? '0');
+    setFreightInput(snapshot.freightInput ?? '0');
+    setObservations(snapshot.observations ?? '');
+    if (snapshot.seller) setSeller(snapshot.seller);
+    if (snapshot.categoryId) setCategoryId(snapshot.categoryId);
+    setEmitFiscal(snapshot.emitFiscal === true);
+    if (Array.isArray(snapshot.payments) && snapshot.payments.length) setPayments(snapshot.payments);
+    if (snapshot.step) setStep(snapshot.step);
+  };
   const newSale = () => {
     saleGenerationRef.current += 1;
     setStep('product');
@@ -503,9 +557,14 @@ function App() {
     searchInputRef.current?.focus();
   };
   const startNewSale = async () => {
+    const leavingSaved = Boolean(activeSaleRef.current);
     // O pedido atual fica gravado em atendimento antes de abrir um novo.
-    if (activeSaleRef.current && items.length) await saveDraft(items);
+    if (leavingSaved && items.length) await saveDraft(items);
+    if (leavingSaved) snapshotOrder();
     newSale();
+    // Se havia um pedido novo ainda não gravado (deixado ao retomar outro), ele volta como estava.
+    const pending = leavingSaved ? takeSnapshot('new') : undefined;
+    if (pending) applySnapshot(pending, true);
   };
   const draftPayload = (draftItems: Item[], overrides: { customerCpf?: string } = {}) => ({
     cashSessionId: cashSession?.id,
@@ -588,9 +647,31 @@ function App() {
   };
   const switchToSale = async (draft: any) => {
     if (activeSaleRef.current?.id === draft.id) { setOperationModal(undefined); return; }
-    // Grava o pedido atual antes de trocar, para nenhuma alteração ficar só na tela.
-    if (activeSaleRef.current && items.length) await saveDraft(items);
-    resumeSale(draft);
+    // Grava o pedido atual antes de trocar. Se o salvamento falhar, fica nele para não perder nada.
+    if (activeSaleRef.current && items.length) {
+      const saved = await saveDraft(items);
+      if (!saved) {
+        snapshotOrder();
+        setMessage(current => `Não foi possível salvar o pedido atual; ele foi mantido na tela. ${current}`.trim());
+        return;
+      }
+    }
+    snapshotOrder();
+    // A lista de pedidos pode estar desatualizada: busca a versão mais recente do pedido a retomar.
+    let latest = draft;
+    try {
+      const response = await apiFetch(`${api}/sales/${draft.id}`);
+      if (response.ok) latest = await response.json();
+    } catch { /* usa a versão da lista */ }
+    if (latest.status && latest.status !== 'OPEN') {
+      setMessage('Este pedido não está mais em atendimento.');
+      void loadOrders();
+      return;
+    }
+    resumeSale(latest);
+    // Reaplica o que estava na tela deste pedido (cupom digitado, pagamentos, campos não gravados).
+    const local = takeSnapshot(draft.id);
+    if (local) applySnapshot(local, false);
   };
   // Ao entrar ou atualizar a tela, volta para o pedido (e o cliente) que estavam em edição.
   useEffect(() => {
