@@ -63,29 +63,6 @@ const storedPrincipal = (): Partial<AuthPrincipal> => {
 const newPaymentKey = () => globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
 const numberValue = (value: string) => Math.max(0, Number(value.replace(',', '.')) || 0);
 const roundMoney = (value: number) => Math.round(value * 100) / 100;
-// Pedido em edição neste navegador (por caixa): sobrevive à atualização da tela sem se misturar com outros pedidos.
-const workingOrderKey = (cashSessionId: string) => `pdv-working-order:${cashSessionId}`;
-const readWorkingOrder = (cashSessionId: string): { saleId?: string; cpf?: string } => {
-  try { return JSON.parse(sessionStorage.getItem(workingOrderKey(cashSessionId)) ?? '{}'); } catch { return {}; }
-};
-const writeWorkingOrder = (cashSessionId: string, value: { saleId?: string; cpf?: string }) => {
-  try {
-    if (value.saleId || value.cpf) sessionStorage.setItem(workingOrderKey(cashSessionId), JSON.stringify(value));
-    else sessionStorage.removeItem(workingOrderKey(cashSessionId));
-  } catch { /* armazenamento indisponível: o pedido continua salvo no servidor */ }
-};
-// Rascunho local de cada pedido na tela (por caixa). Guarda também o que o servidor não persiste
-// (cupom digitado, pagamentos, consentimento) e protege o pedido caso o salvamento falhe ao trocar.
-const orderSnapshotsKey = (cashSessionId: string) => `pdv-order-snapshots:${cashSessionId}`;
-const readOrderSnapshots = (cashSessionId: string): Record<string, any> => {
-  try { return JSON.parse(sessionStorage.getItem(orderSnapshotsKey(cashSessionId)) ?? '{}'); } catch { return {}; }
-};
-const writeOrderSnapshots = (cashSessionId: string, value: Record<string, any>) => {
-  try {
-    if (Object.keys(value).length) sessionStorage.setItem(orderSnapshotsKey(cashSessionId), JSON.stringify(value));
-    else sessionStorage.removeItem(orderSnapshotsKey(cashSessionId));
-  } catch { /* armazenamento indisponível: vale o que está salvo no servidor */ }
-};
 const brl = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' });
 const localDate = () => new Date().toLocaleDateString('sv-SE');
 const storeReceipt = {
@@ -107,15 +84,6 @@ const paymentIcon = (method: PaymentMethod) => {
   if (value.includes('cart') || value.includes('credit') || value.includes('debit')) return '▰';
   return '●';
 };
-
-// Aviso que some sozinho depois de alguns segundos e pode ser fechado no X.
-function Notice({ text, className = 'message', role, onClose, seconds = 8 }: { text: string; className?: string; role?: 'alert' | 'status'; onClose: () => void; seconds?: number }) {
-  useEffect(() => {
-    const timer = window.setTimeout(onClose, seconds * 1000);
-    return () => window.clearTimeout(timer);
-  }, [text]);
-  return <p className={`${className} dismissible`} role={role}><span>{text}</span><button type="button" className="notice-close" aria-label="Fechar aviso" onClick={onClose}>×</button></p>;
-}
 
 function App() {
   const [step, setStep] = useState<Step>('product');
@@ -150,9 +118,6 @@ function App() {
   const activeSaleRef = useRef<any>(undefined);
   const draftQueueRef = useRef<Promise<any>>(Promise.resolve());
   const saleGenerationRef = useRef(0);
-  const clearCustomerRef = useRef(false);
-  const paymentMethodsRef = useRef<PaymentMethod[]>([]);
-  const workingOrderSessionRef = useRef('');
   const [draftBusy, setDraftBusy] = useState(false);
   const [openSales, setOpenSales] = useState<any[]>([]);
   const [payments, setPayments] = useState<PaymentEntry[]>([]);
@@ -180,7 +145,6 @@ function App() {
   const [orderSearch, setOrderSearch] = useState('');
   const [orderScope, setOrderScope] = useState<'all' | 'active' | 'deleted' | 'cancelled'>('active');
   const [orderActionError, setOrderActionError] = useState('');
-  const [cashFeedback, setCashFeedback] = useState<{ kind: 'error' | 'info'; text: string }>();
   const [pendingOperations, setPendingOperations] = useState<any>();
   const [cashControl, setCashControl] = useState<any>();
   const [cashSessions, setCashSessions] = useState<CashSession[]>([]);
@@ -451,29 +415,18 @@ function App() {
     }, 85);
   };
 
-  const lookup = async (options: { cpf?: string; quiet?: boolean } = {}) => {
-    const target = options.cpf ?? cpf;
-    if (!options.quiet) setMessage('');
-    const r = await apiFetch(`${api}/customers/${target}`);
+  const lookup = async () => {
+    setMessage('');
+    setCustomer(undefined);
+    const r = await apiFetch(`${api}/customers/${cpf}`);
     const data = await r.json().catch(() => undefined);
-    if (!r.ok) return options.quiet ? undefined : setMessage(data?.message ?? 'Não foi possível consultar o cliente.');
-    // Uma consulta sem resultado não pode desvincular o cliente que já está no pedido.
-    if (!data.found && customer?.found && !options.quiet) {
-      return setMessage('Cliente não localizado. O cliente já vinculado ao pedido foi mantido; apague o CPF para removê-lo.');
-    }
-    if (options.cpf) setCpf(options.cpf);
+    if (!r.ok) return setMessage(data?.message ?? 'Não foi possível consultar o cliente.');
     setCustomer(data);
     setCustomerName(data.name ?? '');
     setCustomerPhone(data.bling?.phone ?? '');
     setCustomerEmail(data.bling?.email ?? '');
     if (data.bling?.phone) setFidelizeiPhone(data.bling.phone);
     if (data.bling?.email) setFidelizeiEmail(data.bling.email);
-    if (data.found) {
-      clearCustomerRef.current = false;
-      // Grava o cliente no pedido na hora, sem depender de uma próxima alteração de item.
-      if (!options.quiet && items.length) void saveDraft(items, { customerCpf: data.cpf });
-    }
-    if (options.quiet) return data;
     if (!data.found) {
       const unavailable = Object.values(data.systems).includes('UNAVAILABLE');
       return setMessage(unavailable
@@ -484,10 +437,10 @@ function App() {
     if (data.bling) return setMessage('Cliente localizado no Bling. Ainda não possui cadastro no Fidelizei.');
     setMessage('Cliente localizado no Fidelizei. Ainda não possui cadastro no Bling.');
   };
-  // Campos que pertencem a um único pedido: sempre zerados ao iniciar ou trocar de pedido,
-  // para que nada de um pedido apareça (ou seja salvo) em outro.
-  paymentMethodsRef.current = paymentMethods;
-  const resetOrderFields = () => {
+  const newSale = () => {
+    saleGenerationRef.current += 1;
+    setStep('product');
+    setItems([]);
     setQuery('');
     setProducts([]);
     setCatalogSearchActive(false);
@@ -500,96 +453,41 @@ function App() {
     setCustomerEmail('');
     setCustomer(undefined);
     setCoupon('');
+    setSale(undefined);
+    activeSaleRef.current = undefined;
     setDiscountMode('value');
     setDiscountInput('0');
     setFreightInput('0');
     setObservations('');
-    // Lê as formas de pagamento mais recentes (esta função pode rodar de dentro de um efeito assíncrono).
-    const methods = paymentMethodsRef.current;
-    const defaultId = methods.find(method => method.isDefault)?.id ?? methods[0]?.id ?? '';
+    const defaultId = paymentMethods.find(method => method.isDefault)?.id ?? paymentMethods[0]?.id ?? '';
     setPayments(defaultId ? [{ key: newPaymentKey(), paymentMethodId: defaultId, amount: '0', receivedAmount: '' }] : []);
     setEmitFiscal(false);
     setReceipt(undefined);
-    clearCustomerRef.current = false;
-  };
-  const snapshotOrder = (unsaved = false) => {
-    if (!cashSession) return;
-    const key = activeSaleRef.current?.id ?? 'new';
-    const snapshots = readOrderSnapshots(cashSession.id);
-    const hasContent = items.length > 0 || customer?.found || Boolean(coupon) || Number(discountInput.replace(',', '.')) > 0
-      || Number(freightInput.replace(',', '.')) > 0 || Boolean(observations.trim());
-    if (hasContent) {
-      snapshots[key] = {
-        items, cpf, customer, customerName, customerPhone, customerEmail, fidelizeiPhone, fidelizeiEmail, programConsent,
-        coupon, discountMode, discountInput, freightInput, observations, seller, categoryId, emitFiscal, payments, step, unsaved
-      };
-    } else delete snapshots[key];
-    writeOrderSnapshots(cashSession.id, snapshots);
-  };
-  const takeSnapshot = (key: string) => {
-    if (!cashSession) return undefined;
-    const snapshots = readOrderSnapshots(cashSession.id);
-    const snapshot = snapshots[key];
-    if (snapshot) { delete snapshots[key]; writeOrderSnapshots(cashSession.id, snapshots); }
-    return snapshot;
-  };
-  const applySnapshot = (snapshot: any, includeItems: boolean) => {
-    if (includeItems && Array.isArray(snapshot.items)) setItems(snapshot.items);
-    if (snapshot.customer) setCustomer(snapshot.customer);
-    setCpf(snapshot.cpf ?? '');
-    setCustomerName(snapshot.customerName ?? '');
-    setCustomerPhone(snapshot.customerPhone ?? '');
-    setCustomerEmail(snapshot.customerEmail ?? '');
-    setFidelizeiPhone(snapshot.fidelizeiPhone ?? '');
-    setFidelizeiEmail(snapshot.fidelizeiEmail ?? '');
-    setProgramConsent(snapshot.programConsent === true);
-    if (snapshot.coupon) setCoupon(snapshot.coupon);
-    setDiscountMode(snapshot.discountMode === 'percent' ? 'percent' : 'value');
-    setDiscountInput(snapshot.discountInput ?? '0');
-    setFreightInput(snapshot.freightInput ?? '0');
-    setObservations(snapshot.observations ?? '');
-    if (snapshot.seller) setSeller(snapshot.seller);
-    if (snapshot.categoryId) setCategoryId(snapshot.categoryId);
-    setEmitFiscal(snapshot.emitFiscal === true);
-    if (Array.isArray(snapshot.payments) && snapshot.payments.length) setPayments(snapshot.payments);
-    if (snapshot.step) setStep(snapshot.step);
-  };
-  const newSale = () => {
-    saleGenerationRef.current += 1;
-    setStep('product');
-    setItems([]);
-    resetOrderFields();
-    setSale(undefined);
-    activeSaleRef.current = undefined;
     setMenuOpen(false);
     setMessage('');
     searchInputRef.current?.focus();
   };
-  const startNewSale = async () => {
-    const leavingSaved = Boolean(activeSaleRef.current);
-    // O pedido atual fica gravado em atendimento antes de abrir um novo.
-    const saveFailed = leavingSaved && items.length > 0 && !(await saveDraft(items));
-    if (leavingSaved) snapshotOrder(saveFailed);
-    newSale();
-    // Se havia um pedido novo ainda não gravado (deixado ao retomar outro), ele volta como estava.
-    const pending = leavingSaved ? takeSnapshot('new') : undefined;
-    if (pending) applySnapshot(pending, true);
-  };
-  const draftPayload = (draftItems: Item[], overrides: { customerCpf?: string } = {}) => ({
+
+  const draftPayload = (draftItems: Item[]) => ({
     cashSessionId: cashSession?.id,
     operatorId,
     sellerId: seller,
     categoryId,
-    // O cliente só é enviado quando está identificado; apagar o CPF é um pedido explícito de remoção.
-    customerCpf: clearCustomerRef.current ? undefined : overrides.customerCpf ?? (customer?.found ? customer.cpf : undefined),
-    clearCustomer: clearCustomerRef.current ? true : undefined,
+    customerCpf: customer?.found ? customer.cpf : undefined,
     manualDiscount,
     freight,
     observations,
     emitFiscal,
+    draftStep: step,
+    payments: payments.map(payment => ({
+      paymentMethodId: payment.paymentMethodId,
+      paymentMethodName: paymentMethods.find(method => method.id === payment.paymentMethodId)?.name,
+      amount: numberValue(payment.amount),
+      receivedAmount: isCashMethod(payment.paymentMethodId) && payment.receivedAmount ? numberValue(payment.receivedAmount) : undefined
+    })),
     items: draftItems.map(x => ({ productId: x.id, sku: x.sku, name: x.name, quantity: x.quantity, unitPrice: x.price, comment: x.comment }))
   });
-  const saveDraft = (draftItems: Item[] = items, overrides: { customerCpf?: string } = {}) => {
+  const saveDraft = (draftItems: Item[] = items) => {
     if (!cashSession || !draftItems.length) return Promise.resolve(undefined);
     const generation = saleGenerationRef.current;
     draftQueueRef.current = draftQueueRef.current.catch(() => undefined).then(async () => {
@@ -600,17 +498,18 @@ function App() {
         const response = await apiFetch(current ? `${api}/sales/${current.id}` : `${api}/sales`, {
           method: current ? 'PUT' : 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(draftPayload(draftItems, overrides))
+          body: JSON.stringify(draftPayload(draftItems))
         });
         const data = await response.json();
         if (!response.ok) throw new Error(data.message ?? 'Não foi possível salvar o pedido em atendimento.');
-        if (generation === saleGenerationRef.current) clearCustomerRef.current = false;
         if (generation === saleGenerationRef.current) {
           activeSaleRef.current = data;
           setSale(data);
         }
         setOpenSales(currentList => [data, ...currentList.filter(item => item.id !== data.id)]);
-        setMessage(`Pedido Bling nº ${data.blingOrderNumber ?? data.blingOrderId} · Em atendimento`);
+        setMessage(data.draftSyncStatus === 'PENDING'
+          ? `Pedido nº ${data.blingOrderNumber ?? data.blingOrderId} salvo no PDV. Atualização do Bling pendente, sem perda de dados.`
+          : `Pedido Bling nº ${data.blingOrderNumber ?? data.blingOrderId} · Em atendimento`);
         return data;
       } catch (error) {
         setMessage(error instanceof Error ? error.message : 'Falha ao salvar o pedido em atendimento.');
@@ -621,28 +520,24 @@ function App() {
     });
     return draftQueueRef.current;
   };
-  const loadOpenSales = async (): Promise<any[]> => {
-    if (!cashSession) { setOpenSales([]); return []; }
+  const loadOpenSales = async () => {
+    if (!cashSession) return setOpenSales([]);
     const response = await apiFetch(`${api}/sales/open?cashSessionId=${encodeURIComponent(cashSession.id)}`);
     const data = await response.json().catch(() => []);
-    const list = response.ok && Array.isArray(data) ? data : [];
-    if (response.ok) setOpenSales(list);
-    return list;
+    if (response.ok) setOpenSales(Array.isArray(data) ? data : []);
   };
-  const resumeSale = (draft: any, notice?: string) => {
+  const activateSale = (draft: any) => {
     saleGenerationRef.current += 1;
-    resetOrderFields();
     activeSaleRef.current = draft;
     setSale(draft);
     setItems((draft.items ?? []).map((item: any) => ({ id: item.productId, sku: item.sku, name: item.name, quantity: item.quantity, price: item.unitPrice, stock: 0, comment: item.comment })));
     setCustomer(draft.customer);
     setCpf(draft.customer?.cpf ?? '');
+    setFidelizeiPhone(draft.customer?.fidelizei?.phone ?? draft.customer?.bling?.phone ?? '');
+    setFidelizeiEmail(draft.customer?.fidelizei?.email ?? draft.customer?.bling?.email ?? '');
     setCustomerName(draft.customer?.name ?? '');
     setCustomerPhone(draft.customer?.bling?.phone ?? '');
     setCustomerEmail(draft.customer?.bling?.email ?? '');
-    setFidelizeiPhone(draft.customer?.bling?.phone ?? '');
-    setFidelizeiEmail(draft.customer?.bling?.email ?? '');
-    setCoupon(draft.coupon?.code ?? '');
     setSeller(draft.sellerId ?? seller);
     setCategoryId(draft.categoryId ?? categoryId);
     setDiscountMode('value');
@@ -650,56 +545,41 @@ function App() {
     setFreightInput(String(draft.freight ?? 0).replace('.', ','));
     setObservations(draft.observations ?? '');
     setEmitFiscal(draft.emitFiscal === true);
-    setStep('product');
+    setCoupon(draft.coupon?.code ?? '');
+    const restoredPayments = Array.isArray(draft.payments) ? draft.payments.filter((payment: any) => payment.paymentMethodId).map((payment: any) => ({
+      key: newPaymentKey(),
+      paymentMethodId: String(payment.paymentMethodId),
+      amount: String(payment.amount ?? 0).replace('.', ','),
+      receivedAmount: payment.receivedAmount === undefined ? '' : String(payment.receivedAmount).replace('.', ','),
+      touched: Number(payment.amount) > 0
+    })) : [];
+    const defaultId = paymentMethods.find(method => method.isDefault)?.id ?? paymentMethods[0]?.id ?? '';
+    setPayments(restoredPayments.length ? restoredPayments : defaultId ? [{ key: newPaymentKey(), paymentMethodId: defaultId, amount: '0', receivedAmount: '' }] : []);
+    setStep(['product', 'customer', 'payment'].includes(draft.draftStep) ? draft.draftStep : 'product');
     setOperationModal(undefined);
-    setMessage(notice ?? `Pedido Bling nº ${draft.blingOrderNumber ?? draft.blingOrderId} retomado.`);
+    setMessage(`Pedido Bling nº ${draft.blingOrderNumber ?? draft.blingOrderId} retomado.`);
   };
-  const switchToSale = async (draft: any) => {
-    if (activeSaleRef.current?.id === draft.id) { setOperationModal(undefined); return; }
-    // Grava o pedido atual antes de trocar. Se o Bling recusar, o pedido fica guardado neste navegador
-    // (com os itens e campos como estão) e volta igual ao retomá-lo, sem impedir a troca.
-    let saveFailed = false;
-    if (activeSaleRef.current && items.length) saveFailed = !(await saveDraft(items));
-    snapshotOrder(saveFailed);
-    // A lista de pedidos pode estar desatualizada: busca a versão mais recente do pedido a retomar.
-    let latest = draft;
-    try {
-      const response = await apiFetch(`${api}/sales/${draft.id}`);
-      if (response.ok) latest = await response.json();
-    } catch { /* usa a versão da lista */ }
-    if (latest.status && latest.status !== 'OPEN') {
-      setMessage('Este pedido não está mais em atendimento.');
-      void loadOrders();
-      return;
+  const resumeSale = async (draft: any) => {
+    if (draft.id === activeSaleRef.current?.id) return activateSale(draft);
+    if (activeSaleRef.current && items.length) {
+      const saved = await saveDraft(items);
+      if (!saved) return setMessage('O pedido atual não pôde ser salvo. Ele foi mantido na tela para evitar perda de dados.');
     }
-    const failureMessage = saveFailed ? 'O pedido anterior não pôde ser salvo no Bling e foi guardado neste navegador; ao retomá-lo, tente salvar de novo.' : undefined;
-    resumeSale(latest, failureMessage);
-    // Reaplica o que estava na tela deste pedido (cupom digitado, pagamentos, campos não gravados).
-    const local = takeSnapshot(draft.id);
-    if (local) applySnapshot(local, local.unsaved === true);
+    activateSale(draft);
   };
-  // Ao entrar ou atualizar a tela, volta para o pedido (e o cliente) que estavam em edição.
+  const startNewSale = async () => {
+    if (activeSaleRef.current && items.length) {
+      const saved = await saveDraft(items);
+      if (!saved) return setMessage('O pedido atual não pôde ser salvo. Ele foi mantido na tela para evitar perda de dados.');
+    }
+    newSale();
+  };
   useEffect(() => {
-    if (!cashSession) { workingOrderSessionRef.current = ''; return; }
-    const sessionId = cashSession.id;
-    let cancelled = false;
-    void (async () => {
-      const list = await loadOpenSales();
-      if (cancelled) return;
-      const stored = readWorkingOrder(sessionId);
-      if (!activeSaleRef.current) {
-        const draft = stored.saleId ? list.find(item => item.id === stored.saleId) : undefined;
-        if (draft) resumeSale(draft, 'Pedido retomado após atualizar a tela.');
-        else if (stored.cpf) await lookup({ cpf: stored.cpf, quiet: true });
-      }
-      if (!cancelled) workingOrderSessionRef.current = sessionId;
-    })();
-    return () => { cancelled = true; };
-  }, [cashSession?.id]);
-  useEffect(() => {
-    if (!cashSession || workingOrderSessionRef.current !== cashSession.id) return;
-    writeWorkingOrder(cashSession.id, sale?.id ? { saleId: sale.id } : { cpf: customer?.found ? customer.cpf : undefined });
-  }, [cashSession?.id, sale?.id, customer?.found, customer?.cpf]);
+    if (!activeSaleRef.current || !items.length) return;
+    const timer = window.setTimeout(() => { void saveDraft(items); }, 450);
+    return () => window.clearTimeout(timer);
+  }, [step, customer?.cpf, payments, discountInput, freightInput, observations, emitFiscal, seller, categoryId]);
+  useEffect(() => { void loadOpenSales(); }, [cashSession?.id]);
 
   const enrollFidelizei = async () => {
     if (!customer?.bling || !programConsent) return;
@@ -793,7 +673,7 @@ function App() {
     setCompleting(true);
     try {
       const activeSale = await create();
-      if (!activeSale) { fiscalPrintWindow?.close(); return; }
+      if (!activeSale) return;
       const r = await apiFetch(`${api}/sales/${activeSale.id}/complete`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -806,19 +686,16 @@ function App() {
         })
       });
       const data = await r.json();
-      if (!r.ok) { fiscalPrintWindow?.close(); return setMessage(data.message ?? 'Não foi possível concluir a venda.'); }
+      if (!r.ok) return setMessage(data.message ?? 'Não foi possível concluir a venda.');
       const completionMessage = data.status === 'COMPLETED'
         ? `Venda concluída. Pedido Bling nº ${data.blingOrderNumber ?? data.blingOrderId}${data.fiscalStatus === 'REQUESTED' ? data.fiscalDocumentUrl ? ' · Documento fiscal aberto para impressão.' : ' · NFC-e solicitada; aguarde a autorização no Bling para imprimir o documento fiscal.' : data.fiscalStatus === 'FAILED' ? ' · Pedido salvo, mas a NFC-e precisa ser verificada no Bling.' : ' · Impressão do comprovante não fiscal aberta.'}`
-        : `Pedido Bling nº ${data.blingOrderNumber ?? data.blingOrderId} criado, mas o Bling não concluiu a baixa de estoque, o financeiro ou a situação "Atendido". ${data.lastError ? `Motivo: ${data.lastError}` : 'Confira o pedido no Bling.'}`;
+        : 'Pedido criado; estoque, financeiro ou situação no Bling exigem conferência.';
       if (emitFiscal && data.fiscalDocumentUrl && fiscalPrintWindow) fiscalPrintWindow.location.replace(data.fiscalDocumentUrl);
       else if (emitFiscal) fiscalPrintWindow?.close();
       setOpenSales(current => current.filter(item => item.id !== data.id));
       newSale();
       if (!emitFiscal) setReceipt(data);
       setMessage(completionMessage);
-    } catch (error) {
-      fiscalPrintWindow?.close();
-      setMessage(error instanceof Error ? `Não foi possível finalizar a venda: ${error.message}` : 'Não foi possível finalizar a venda. Verifique a conexão e tente novamente.');
     } finally {
       setCompleting(false);
     }
@@ -956,27 +833,15 @@ function App() {
   const reopenCash = async (session: CashSession) => {
     if (!window.confirm('Reabrir este caixa para realizar ajustes?')) return;
     setOperationBusy(true);
-    setCashFeedback(undefined);
     try {
       const response = await apiFetch(`${api}/cash/sessions/${session.id}/reopen`, { method: 'POST' });
-      const data = await response.json().catch(() => ({}));
+      const data = await response.json();
       if (!response.ok) throw new Error(data.message ?? 'Não foi possível reabrir o caixa.');
-      const reopened = data.session as CashSession;
+      setCashSession(data.session);
       setCashControl(undefined);
       await loadCashSessions();
-      if (reopened.operatorId === operatorId) {
-        // Caixa do operador atual: passa a ser o caixa em uso, com a mesma conta, loja e unidade da abertura original.
-        setCashSession(reopened);
-        setSelectedAccount(reopened.accountId);
-        setSelectedChannel(reopened.channelId ?? 'DEFAULT');
-        setSelectedBusinessUnit(reopened.businessUnitId ?? '');
-        setOperationModal(undefined);
-        setMessage('Caixa reaberto. Você já pode fazer ajustes e novas vendas. O evento ficou registrado apenas no controle interno do PDV.');
-      } else {
-        // As vendas e movimentações exigem o operador responsável pelo caixa.
-        setCashFeedback({ kind: 'info', text: `Caixa reaberto para o operador ${sellers.find(item => item.id === reopened.operatorId)?.name ?? reopened.operatorId}. Para fazer ajustes ou vendas nele, entre no PDV com esse operador.` });
-      }
-    } catch (error) { setCashFeedback({ kind: 'error', text: error instanceof Error ? error.message : 'Falha ao reabrir o caixa.' }); }
+      setMessage('Caixa reaberto. O evento ficou registrado apenas no controle interno do PDV.');
+    } catch (error) { setMessage(error instanceof Error ? error.message : 'Falha ao reabrir o caixa.'); }
     finally { setOperationBusy(false); }
   };
   const deleteCash = async (session: CashSession) => {
@@ -1008,7 +873,6 @@ function App() {
       void loadOrders();
     }
     if (type === 'control') {
-      setCashFeedback(undefined);
       setCashControl(undefined);
       setCashSessions([]);
       void loadCashSessions();
@@ -1071,6 +935,7 @@ function App() {
       setCashSession(undefined);
       setDayHistory(undefined);
       setMessage('Caixa fechado. O saldo final permaneceu somente no controle interno e não gerou movimento financeiro no Bling.');
+      logout();
     } catch (error) { setMessage(error instanceof Error ? error.message : 'Falha ao fechar o caixa.'); }
     finally { setOperationBusy(false); }
   };
@@ -1117,32 +982,11 @@ function App() {
     finally { setOperationBusy(false); }
   };
 
-  // O operador precisa se identificar ao acessar o PDV. Só depois disso o caixa em aberto dele é
-  // carregado e a abertura (ou reabertura) de caixa fica disponível.
-  if (!authToken && authEnabled !== false) {
-    return <main className="login-screen">
-      <section className="login-card" aria-labelledby="login-title">
-        <div className="login-brand"><img className="vivi-logo" src="/vivi-logo-original.png" alt="Vivi Moda Plus Size" /></div>
-        <div className="login-heading"><small>VIVI MODA · CAIXA 01</small><h1 id="login-title">Entrar no PDV</h1><p>Identifique o operador para acessar a frente de caixa.</p></div>
-        {authEnabled === undefined ? <p className="login-hint" role="status">Conectando ao servidor…</p> : <>
-          <label>Operador<select value={loginOperator} onChange={event => setLoginOperator(event.target.value)}>
-            <option value="">{sellers.length ? 'Selecione' : 'Carregando operadores do Bling…'}</option>
-            {sellers.map(item => <option value={item.id} key={item.id}>{item.name}</option>)}
-          </select></label>
-          <label>PIN<input type="password" inputMode="numeric" autoComplete="current-password" value={loginPin} onChange={event => setLoginPin(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') void login(); }} /></label>
-          <button className="finish" disabled={loginBusy || !loginOperator || !loginPin} onClick={() => void login()}>{loginBusy ? 'Validando…' : 'Entrar'}</button>
-          {!sellers.length && <p className="login-hint">Se os operadores não aparecerem, confira a conexão com o Bling.</p>}
-          {message && <Notice text={message} role="alert" onClose={() => setMessage('')} />}
-        </>}
-      </section>
-    </main>;
-  }
-
   return <main>
     <header className="pos-header">
       <div className="brand-block"><img className="vivi-logo" src="/vivi-logo-original.png" alt="Vivi Moda Plus Size" /><div><small>VIVI MODA · CAIXA 01</small><h1>Frente de caixa</h1><p>Venda integrada ao Bling e Fidelizei</p></div></div>
       <div className="header-actions">
-        {authEnabled ? <div className="operator-select authenticated-operator"><span>Operador</span><b>{operatorName}</b><small>{authRole === 'MANAGER' ? 'Gerente' : 'Operador'}</small>{authToken && <button onClick={logout}>Sair</button>}</div> : <label className="operator-select"><span>Operador</span><select value={operatorId} onChange={e => setOperatorId(e.target.value)}>
+        {authEnabled ? <div className="operator-select authenticated-operator"><span>Operador</span><b>{operatorName || 'Definido na abertura'}</b><small>{authToken ? authRole === 'MANAGER' ? 'Gerente' : 'Operador' : 'Caixa fechado'}</small>{authToken && <button onClick={logout}>Sair</button>}</div> : <label className="operator-select"><span>Operador</span><select value={operatorId} onChange={e => setOperatorId(e.target.value)}>
           <option value="">Selecione no Bling</option>{sellers.map(s => <option value={s.id} key={s.id}>{s.name}</option>)}
         </select></label>}
         <div className="operations-wrap">
@@ -1209,17 +1053,7 @@ function App() {
 
         {step === 'customer' && <>
           <div className="section-title"><div><small>ETAPA 2</small><h2>Identificar cliente</h2></div><span>Bling + Fidelizei</span></div>
-          <label>CPF<div className="row"><input value={cpf} onChange={e => {
-            const value = e.target.value;
-            setCpf(value);
-            setMessage('');
-            // Digitar não desvincula o cliente; só apagar o CPF remove o cliente do pedido.
-            if (!value.trim() && customer) {
-              clearCustomerRef.current = true;
-              setCustomer(undefined);
-              if (items.length) void saveDraft(items);
-            }
-          }} placeholder="000.000.000-00" /><button onClick={() => void lookup()}>Consultar</button></div></label>
+          <label>CPF<div className="row"><input value={cpf} onChange={e => { setCpf(e.target.value); setCustomer(undefined); setMessage(''); }} placeholder="000.000.000-00" /><button onClick={lookup}>Consultar</button></div></label>
           {!customer && <div className="customer-card final-consumer"><div><span className="vip">PADRÃO BLING</span><h3>Consumidor Final</h3><p>Identificação opcional. A venda pode seguir normalmente sem CPF.</p></div><button onClick={() => setStep('payment')}>Continuar sem identificar</button></div>}
           {customer?.found ? <div className="customer-card unified">
             <div className="customer-identity">
@@ -1346,7 +1180,7 @@ function App() {
           </div>
           <div className="nav-actions"><button className="secondary" onClick={() => setStep('customer')}>Voltar</button><button className="finish" disabled={!cashSession || completing || !items.length || !seller || !categoryId || !paymentsValid} onClick={complete}>{completing ? 'Finalizando no Bling…' : `Finalizar venda · ${brl.format(total)}`}</button></div>
         </>}
-        {message && <Notice text={message} className={sale?.status === 'COMPLETED' ? 'message success' : 'message'} onClose={() => setMessage('')} />}
+        {message && <p className={sale?.status === 'COMPLETED' ? 'message success' : 'message'}>{message}</p>}
       </article>
 
       <aside className="cart">
@@ -1381,7 +1215,7 @@ function App() {
             <label>Operador<select value={loginOperator} onChange={event => setLoginOperator(event.target.value)}><option value="">Selecione</option>{sellers.map(item => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
             <label>PIN<input type="password" inputMode="numeric" autoComplete="current-password" value={loginPin} onChange={event => setLoginPin(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') void login(); }} /></label>
             <button className="finish" disabled={loginBusy || !loginOperator || !loginPin} onClick={() => void login()}>{loginBusy ? 'Validando…' : 'Continuar abertura'}</button>
-            {message && <Notice text={message} onClose={() => setMessage('')} />}
+            {message && <p className="message">{message}</p>}
           </div> : <>
           {authEnabled && <div className="opening-operator"><span>Operador responsável</span><b>{operatorName}</b><button className="secondary" onClick={logout}>Trocar operador</button></div>}
           <label>Loja / canal de venda<select value={selectedChannel} onChange={event => {
@@ -1403,9 +1237,6 @@ function App() {
           <button className="finish" disabled={operationBusy || numberValue(operationAmount) <= 0} onClick={() => void registerCashOperation(operationModal === 'withdrawal' ? 'WITHDRAWAL' : 'SUPPLY')}>{operationBusy ? 'Registrando no Bling…' : `Registrar ${operationModal === 'withdrawal' ? 'sangria' : 'suprimento'} no Bling`}</button>
         </div>}
         {operationModal === 'control' && <div className="closing-review cash-control">
-          {cashFeedback && (cashFeedback.kind === 'error'
-            ? <div className="order-action-error" role="alert"><div><b>Não foi possível reabrir o caixa</b><span>{cashFeedback.text}</span></div><button type="button" className="notice-close" aria-label="Fechar aviso" onClick={() => setCashFeedback(undefined)}>×</button></div>
-            : <Notice text={cashFeedback.text} className="message success" role="status" seconds={10} onClose={() => setCashFeedback(undefined)} />)}
           {!cashControl ? <>
             <div className="report-filters">
               <label>Início<input type="date" value={cashFrom} onChange={event => setCashFrom(event.target.value)} /></label>
@@ -1478,7 +1309,7 @@ function App() {
           <div className="report-filters order-filters"><label>Início<input type="date" value={orderFrom} onChange={event => setOrderFrom(event.target.value)} /></label><label>Fim<input type="date" value={orderTo} onChange={event => setOrderTo(event.target.value)} /></label><label>Cliente, CPF ou pedido<input value={orderSearch} placeholder="Pesquisar" onChange={event => setOrderSearch(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') void loadOrders(); }} /></label><button className="finish" disabled={operationBusy} onClick={() => void loadOrders()}>Filtrar pedidos</button></div>
           <div className="closing-summary order-summary"><div><small>Pedidos ativos</small><b>{ordersSummary.count}</b></div><div><small>Total ativo</small><b>{brl.format(ordersSummary.total)}</b></div><div><small>Excluídos</small><b>{ordersSummary.deleted}</b></div><div><small>Cancelados</small><b>{ordersSummary.cancelled}</b></div></div>
           <div className="order-table"><div className="table-head"><span>Número</span><span>Data</span><span>Cliente</span><span>Total</span><span>Situação</span><span>Ações</span></div>{orders.map(item => <div className="table-row" key={item.id}>
-            <b>{item.blingOrderNumber ?? item.blingOrderId ?? item.id.slice(0, 8)}</b><span>{new Date(item.createdAt).toLocaleString('pt-BR')}</span><span>{item.customer?.name ?? 'Consumidor Final'}<small>{item.customer?.cpf ?? ''}</small></span><b>{brl.format(item.total)}</b><span className={item.status === 'DELETED' || item.status === 'CANCELLED' ? 'status-cancelled' : 'status-open'}>{item.status === 'DELETED' ? 'Excluído' : item.status === 'CANCELLED' ? 'Cancelado' : item.status === 'COMPLETED' ? 'Atendido' : item.status === 'OPEN' ? 'Em atendimento' : item.status}</span><span className="order-row-actions">{item.status === 'OPEN' && item.cashSessionId === cashSession?.id && <button className="resume-action" disabled={operationBusy} onClick={() => void switchToSale(item)}>Retomar</button>}{!['DELETED','CANCELLED','PROCESSING'].includes(item.status) && <><button className="cancel-action" disabled={operationBusy} onClick={() => void cancelOrder(item)}>Cancelar</button><button className="danger-action" disabled={operationBusy} onClick={() => void deleteOrder(item)}>Excluir</button></>}</span>
+            <b>{item.blingOrderNumber ?? item.blingOrderId ?? item.id.slice(0, 8)}</b><span>{new Date(item.createdAt).toLocaleString('pt-BR')}</span><span>{item.customer?.name ?? 'Consumidor Final'}<small>{item.customer?.cpf ?? ''}</small></span><b>{brl.format(item.total)}</b><span className={item.status === 'DELETED' || item.status === 'CANCELLED' ? 'status-cancelled' : 'status-open'}>{item.status === 'DELETED' ? 'Excluído' : item.status === 'CANCELLED' ? 'Cancelado' : item.status === 'COMPLETED' ? 'Atendido' : item.status === 'OPEN' ? item.draftSyncStatus === 'PENDING' ? 'Em atendimento · sincronização pendente' : 'Em atendimento' : item.status}</span><span className="order-row-actions">{item.status === 'OPEN' && item.cashSessionId === cashSession?.id && <button className="resume-action" disabled={operationBusy} onClick={() => void resumeSale(item)}>Retomar</button>}{!['DELETED','CANCELLED','PROCESSING'].includes(item.status) && <><button className="cancel-action" disabled={operationBusy} onClick={() => void cancelOrder(item)}>Cancelar</button><button className="danger-action" disabled={operationBusy} onClick={() => void deleteOrder(item)}>Excluir</button></>}</span>
           </div>)}{!orders.length && <div className="empty-state compact">{operationBusy ? 'Consultando pedidos…' : 'Nenhum pedido encontrado no período.'}</div>}</div>
         </div>}
         {operationModal === 'pending' && <div className="return-list pending-list">
