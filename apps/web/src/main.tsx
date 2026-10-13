@@ -108,6 +108,15 @@ const paymentIcon = (method: PaymentMethod) => {
   return '●';
 };
 
+// Aviso que some sozinho depois de alguns segundos e pode ser fechado no X.
+function Notice({ text, className = 'message', role, onClose, seconds = 8 }: { text: string; className?: string; role?: 'alert' | 'status'; onClose: () => void; seconds?: number }) {
+  useEffect(() => {
+    const timer = window.setTimeout(onClose, seconds * 1000);
+    return () => window.clearTimeout(timer);
+  }, [text]);
+  return <p className={`${className} dismissible`} role={role}><span>{text}</span><button type="button" className="notice-close" aria-label="Fechar aviso" onClick={onClose}>×</button></p>;
+}
+
 function App() {
   const [step, setStep] = useState<Step>('product');
   const [products, setProducts] = useState<Product[]>([]);
@@ -1127,7 +1136,7 @@ function App() {
           <label>PIN<input type="password" inputMode="numeric" autoComplete="current-password" value={loginPin} onChange={event => setLoginPin(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') void login(); }} /></label>
           <button className="finish" disabled={loginBusy || !loginOperator || !loginPin} onClick={() => void login()}>{loginBusy ? 'Validando…' : 'Entrar'}</button>
           {!sellers.length && <p className="login-hint">Se os operadores não aparecerem, confira a conexão com o Bling.</p>}
-          {message && <p className="message" role="alert">{message}</p>}
+          {message && <Notice text={message} role="alert" onClose={() => setMessage('')} />}
         </>}
       </section>
     </main>;
@@ -1341,7 +1350,7 @@ function App() {
           </div>
           <div className="nav-actions"><button className="secondary" onClick={() => setStep('customer')}>Voltar</button><button className="finish" disabled={!cashSession || completing || !items.length || !seller || !categoryId || !paymentsValid} onClick={complete}>{completing ? 'Finalizando no Bling…' : `Finalizar venda · ${brl.format(total)}`}</button></div>
         </>}
-        {message && <p className={sale?.status === 'COMPLETED' ? 'message success' : 'message'}>{message}</p>}
+        {message && <Notice text={message} className={sale?.status === 'COMPLETED' ? 'message success' : 'message'} onClose={() => setMessage('')} />}
       </article>
 
       <aside className="cart">
@@ -1376,7 +1385,7 @@ function App() {
             <label>Operador<select value={loginOperator} onChange={event => setLoginOperator(event.target.value)}><option value="">Selecione</option>{sellers.map(item => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
             <label>PIN<input type="password" inputMode="numeric" autoComplete="current-password" value={loginPin} onChange={event => setLoginPin(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') void login(); }} /></label>
             <button className="finish" disabled={loginBusy || !loginOperator || !loginPin} onClick={() => void login()}>{loginBusy ? 'Validando…' : 'Continuar abertura'}</button>
-            {message && <p className="message">{message}</p>}
+            {message && <Notice text={message} onClose={() => setMessage('')} />}
           </div> : <>
           {authEnabled && <div className="opening-operator"><span>Operador responsável</span><b>{operatorName}</b><button className="secondary" onClick={logout}>Trocar operador</button></div>}
           <label>Loja / canal de venda<select value={selectedChannel} onChange={event => {
@@ -1399,8 +1408,8 @@ function App() {
         </div>}
         {operationModal === 'control' && <div className="closing-review cash-control">
           {cashFeedback && (cashFeedback.kind === 'error'
-            ? <div className="order-action-error" role="alert"><div><b>Não foi possível reabrir o caixa</b><span>{cashFeedback.text}</span></div></div>
-            : <div className="message success" role="status">{cashFeedback.text}</div>)}
+            ? <div className="order-action-error" role="alert"><div><b>Não foi possível reabrir o caixa</b><span>{cashFeedback.text}</span></div><button type="button" className="notice-close" aria-label="Fechar aviso" onClick={() => setCashFeedback(undefined)}>×</button></div>
+            : <Notice text={cashFeedback.text} className="message success" role="status" seconds={10} onClose={() => setCashFeedback(undefined)} />)}
           {!cashControl ? <>
             <div className="report-filters">
               <label>Início<input type="date" value={cashFrom} onChange={event => setCashFrom(event.target.value)} /></label>

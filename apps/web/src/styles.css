@@ -780,3 +780,11 @@ main{padding:12px 16px;max-width:1680px;margin:0 auto}
 .login-heading p, .login-hint { margin: 0; color: var(--muted, #716d67); font-size: 13px; line-height: 1.45; }
 .login-card label { display: grid; gap: 7px; margin: 0; font-weight: 700; font-size: 13px; }
 .login-card .message { position: static; margin: 0; }
+
+/* Avisos fecháveis */
+.message.dismissible { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.message.dismissible > span { flex: 1; }
+.notice-close { flex: none; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: inherit; font-size: 20px; line-height: 1; cursor: pointer; opacity: .65; }
+.notice-close:hover { opacity: 1; background: rgba(0, 0, 0, .08); }
+.order-action-error { position: relative; }
+.order-action-error > .notice-close { position: absolute; top: 8px; right: 8px; }
