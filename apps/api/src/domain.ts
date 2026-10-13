@@ -54,6 +54,9 @@ export type Sale = {
   paymentMethodId?: string;
   paymentMethodName?: string;
   payments?: PaymentSplit[];
+  draftStep?: 'product' | 'customer' | 'payment';
+  draftSyncStatus?: 'SYNCED' | 'PENDING';
+  draftSyncError?: string;
   amountReceived?: number;
   change?: number;
   subtotal: number;
