@@ -240,10 +240,13 @@ const findFinalConsumerId = async () => {
 type SalesOrderInput = { customerId?: string; sellerId: string; salesChannelId?: string; businessUnitId?: string; categoryId?: string; items: SaleItem[]; discount: number; freight: number; observations?: string; payments: PaymentSplit[]; idempotencyKey: string; statusId?: string };
 const buildOrderPayload = async (input: SalesOrderInput) => {
   const customerId = input.customerId ?? await findFinalConsumerId();
+  const orderDate = saoPauloDate();
   const itemNotes = input.items.filter(item => item.comment?.trim()).map(item => `${item.sku}: ${item.comment?.trim()}`).join(' | ');
   const orderNotes = [input.observations?.trim(), itemNotes ? `Itens: ${itemNotes}` : undefined].filter(Boolean).join('\n');
   return {
-    data: saoPauloDate(),
+    data: orderDate,
+    dataSaida: orderDate,
+    dataPrevista: orderDate,
     numeroLoja: input.idempotencyKey,
     contato: { id: Number(customerId) },
     vendedor: { id: Number(input.sellerId) },
@@ -261,11 +264,11 @@ const buildOrderPayload = async (input: SalesOrderInput) => {
     desconto: input.discount ? { valor: input.discount, unidade: 'REAL' } : undefined,
     transporte: input.freight ? { fretePorConta: 0, frete: input.freight } : undefined,
     observacoes: orderNotes || undefined,
-    parcelas: input.payments.length ? input.payments.map(payment => ({
-      dataVencimento: saoPauloDate(),
+    parcelas: input.payments.map(payment => ({
+      dataVencimento: orderDate,
       valor: payment.amount,
       formaPagamento: { id: Number(payment.paymentMethodId) }
-    })) : undefined
+    }))
   };
 };
 const readOrderNumber = async (id: string) => {
@@ -460,24 +463,12 @@ const generateNfce = async (orderId: string) => {
   }
   return { status: 'REQUESTED' as const, fiscalId, documentUrl };
 };
-// Resume o corpo de erro do Bling em texto legível (mensagem, descrição e cada campo recusado).
-const describeBlingError = (raw: string) => {
-  try {
-    const parsed = JSON.parse(raw) as { error?: { message?: string; description?: string; fields?: { msg?: string; element?: unknown }[] } };
-    const error = parsed.error;
-    if (!error) return raw;
-    const fields = (error.fields ?? []).map(field => field.msg).filter(Boolean).join('; ');
-    return [error.message, error.description, fields].filter(Boolean).join(' — ');
-  } catch {
-    return raw;
-  }
-};
 const blingFailure = async (response: Response, operation: string): Promise<never> => {
   const detail = await response.text();
   const reconnect = response.status === 401 || response.status === 403
     ? ' Reconecte o aplicativo autorizando Contas Financeiras e Caixas e Bancos.'
     : '';
-  throw new Error(`Bling: ${operation} falhou (HTTP ${response.status}).${reconnect}${detail ? ` ${describeBlingError(detail).slice(0, 900)}` : ''}`);
+  throw new Error(`Bling: ${operation} falhou (HTTP ${response.status}).${reconnect}${detail ? ` ${detail.slice(0, 240)}` : ''}`);
 };
 
 let accountsCache: { expires: number; data: { id: string; name: string; type: string; active: boolean }[] } | undefined;
