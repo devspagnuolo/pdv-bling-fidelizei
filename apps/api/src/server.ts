@@ -192,6 +192,7 @@ app.get('/integrations/bling/connect', async (_req, reply) => {
   authorizeUrl.searchParams.set('response_type', 'code');
   authorizeUrl.searchParams.set('client_id', clientId);
   authorizeUrl.searchParams.set('state', state);
+  authorizeUrl.searchParams.set('redirect_uri', redirectUri);
   return reply.redirect(authorizeUrl.toString());
 });
 app.get('/integrations/bling/callback', async (req, reply) => {
