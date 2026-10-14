@@ -93,9 +93,12 @@ const saveBlingTokens = async (tokens: BlingTokenResponse) => {
 };
 
 export const exchangeBlingAuthorizationCode = async (code: string) => {
+  const redirectUri = process.env.BLING_REDIRECT_URI;
+  if (!redirectUri) throw new Error('URL de retorno do aplicativo Bling não configurada');
   const tokens = await requestTokens(new URLSearchParams({
     grant_type: 'authorization_code',
-    code
+    code,
+    redirect_uri: redirectUri
   }));
   const expiresAt = await saveBlingTokens(tokens);
   return { expiresAt };
