@@ -613,6 +613,61 @@ const fidelizeiError = async (response: Response, operation: string): Promise<ne
   throw new Error(`Fidelizei: ${operation} falhou — ${guidance[response.status] ?? `HTTP ${response.status}`}${detail ? `: ${detail.slice(0, 180)}` : ''}`);
 };
 const unwrap = (payload: unknown) => (payload as { data?: unknown })?.data ?? payload;
+const asRecord = (value: unknown): Record<string, unknown> | undefined =>
+  value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+const firstDefined = (record: Record<string, unknown>, keys: string[]) => {
+  for (const key of keys) if (record[key] !== undefined && record[key] !== null && record[key] !== '') return { key, value: record[key] };
+  return undefined;
+};
+const parseCouponDiscount = (data: Record<string, unknown>, subtotal: number) => {
+  const redemption = asRecord(data.redemption);
+  const coupon = asRecord(data.coupon ?? data.cupom);
+  const candidates = [
+    asRecord(data.reward), asRecord(data.recompensa), asRecord(data.rewardData),
+    asRecord(redemption?.reward), asRecord(redemption?.recompensa),
+    asRecord(coupon?.reward), asRecord(coupon?.recompensa),
+    asRecord(data.benefit), asRecord(data.beneficio), coupon, redemption, data
+  ].filter((candidate): candidate is Record<string, unknown> => Boolean(candidate));
+  const ruleKeys = ['discountType', 'discount_type', 'tipoDesconto', 'tipo_desconto', 'discountValue', 'discount_value', 'discountAmount', 'discount_amount', 'discountPercentage', 'percentage', 'percentual'];
+  const reward = candidates.find(candidate => ruleKeys.some(key => candidate[key] !== undefined)) ?? candidates[0] ?? data;
+  const nestedDiscount = asRecord(reward.discount) ?? asRecord(reward.benefit) ?? asRecord(reward.beneficio);
+  const rule = nestedDiscount ? { ...reward, ...nestedDiscount } : reward;
+
+  const minimumInCents = firstDefined(rule, ['minimumOrderCents', 'minimumBasketCents', 'minOrderCents', 'valorMinimoCentavos']);
+  const minimumInCurrency = firstDefined(rule, ['minimumOrderValue', 'minimumOrderAmount', 'minOrderValue', 'minimumBasketValue', 'valorMinimoPedido', 'pedidoMinimo']);
+  const minimum = minimumInCents
+    ? numericValue(minimumInCents.value) / 100
+    : minimumInCurrency ? numericValue(minimumInCurrency.value) : 0;
+  if (subtotal + 0.0001 < minimum) {
+    throw new Error(`Fidelizei: pedido abaixo do mínimo de R$ ${minimum.toFixed(2)} exigido pelo cupom`);
+  }
+
+  const typeEntry = firstDefined(rule, ['discountType', 'discount_type', 'tipoDesconto', 'tipo_desconto', 'type', 'kind', 'tipo']) ??
+    firstDefined(nestedDiscount ?? {}, ['discountType', 'tipoDesconto', 'type', 'kind', 'tipo']);
+  const type = String(typeEntry?.value ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  const percentKeys = ['discountPercentage', 'discount_percentage', 'percentage', 'percent', 'percentOff', 'percent_off', 'percentageOff', 'percentage_off', 'percentualDesconto', 'percentual_desconto', 'descontoPercentual', 'desconto_percentual', 'porcentagem'];
+  const centsKeys = ['discountValueCents', 'discount_value_cents', 'amountCents', 'amount_cents', 'valueCents', 'value_cents'];
+  const legacyCentsKeys = ['discountValue', 'discount_value'];
+  const currencyKeys = ['discountAmount', 'discount_amount', 'amountOff', 'amount_off', 'fixedAmount', 'fixed_amount', 'value', 'amount', 'valorDesconto', 'valor_desconto', 'descontoValor', 'desconto_valor', 'valor', 'desconto'];
+  const percentEntry = firstDefined(rule, percentKeys) ?? firstDefined(nestedDiscount ?? {}, percentKeys);
+  const amountEntry = percentEntry ? undefined : firstDefined(rule, centsKeys) ?? firstDefined(rule, legacyCentsKeys) ?? firstDefined(rule, currencyKeys) ??
+    firstDefined(nestedDiscount ?? {}, centsKeys) ?? firstDefined(nestedDiscount ?? {}, legacyCentsKeys) ?? firstDefined(nestedDiscount ?? {}, currencyKeys);
+  const isPercent = Boolean(percentEntry) || /percent|percentage|percentual|porcent|(^|[^a-z])pct([^a-z]|$)|%/.test(type);
+  const selected = isPercent ? percentEntry ?? amountEntry : amountEntry;
+  if (!selected) throw new Error('Fidelizei: regra do cupom não retornou o valor do desconto');
+  const value = numericValue(selected.value, Number.NaN);
+  if (!Number.isFinite(value) || value <= 0) throw new Error('Fidelizei: valor de desconto do cupom inválido');
+
+  const valueUnit = String(rule.discountUnit ?? rule.valueUnit ?? rule.unit ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  const isCents = centsKeys.includes(selected.key) || /centavos|cents?/.test(valueUnit) ||
+    (legacyCentsKeys.includes(selected.key) && !/real|currency|moeda|brl|r\$/.test(valueUnit));
+  const amountInCurrency = isPercent
+    ? subtotal * value / 100
+    : isCents ? value / 100 : value;
+  const discount = Math.round(Math.min(subtotal, amountInCurrency) * 100) / 100;
+  if (discount <= 0) throw new Error('Fidelizei: o cupom não possui desconto aplicável a este pedido');
+  return { reward, discount };
+};
 const mapFidelizeiCustomer = (payload: unknown, cpf: string): FidelizeiCustomer | undefined => {
   const raw = unwrap(payload) as Record<string, unknown> | undefined;
   if (!raw || Array.isArray(raw)) return undefined;
@@ -682,19 +737,12 @@ export const fidelizei = {
     });
     if (!response.ok) return fidelizeiError(response, 'consumo do cupom');
     const data = unwrap(await response.json()) as Record<string, unknown>;
-    const reward = data.reward as Record<string, unknown>;
-    const minimumOrderCents = numericValue(reward.minimumOrderCents);
-    if (Math.round(subtotal * 100) < minimumOrderCents) throw new Error('Fidelizei: pedido abaixo do valor mínimo do cupom');
-    const discountType = textValue(reward.discountType);
-    const discountValue = numericValue(reward.discountValue);
-    const discount = discountType === 'percent'
-      ? Math.round(subtotal * discountValue) / 100
-      : discountValue / 100;
+    const { reward, discount } = parseCouponDiscount(data, subtotal);
     const coupon: Coupon = {
       id: code.trim().toUpperCase(),
       code: code.trim().toUpperCase(),
-      description: textValue(reward.name) ?? 'Cupom Fidelizei',
-      discount: Math.min(subtotal, discount)
+      description: textValue(reward.name ?? reward.description ?? reward.title) ?? 'Cupom Fidelizei',
+      discount
     };
     return { coupon, reservationId: `consumed:${coupon.code}`, expiresAt: new Date().toISOString() };
   },
