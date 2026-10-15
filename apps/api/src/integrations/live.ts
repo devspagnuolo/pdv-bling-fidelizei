@@ -199,7 +199,8 @@ const findBlingCustomer = async (cpf: string): Promise<BlingCustomer | undefined
   if (!id || !name) return undefined;
   return { id, cpf: document, name, email: textValue(raw.email), phone: textValue(raw.celular ?? raw.telefone) };
 };
-const createBlingCustomer = async (input: { name: string; cpf: string; phone?: string; email?: string }) => {
+type BlingCustomerAddress = { postalCode: string; street: string; number: string; complement?: string; neighborhood: string; city: string; state: string };
+const createBlingCustomer = async (input: { name: string; cpf: string; phone?: string; email?: string; address: BlingCustomerAddress }) => {
   const cpf = input.cpf.replace(/\D/g, '');
   const existing = await findBlingCustomer(cpf);
   if (existing) return { ...existing, idempotent: true };
@@ -210,7 +211,8 @@ const createBlingCustomer = async (input: { name: string; cpf: string; phone?: s
     tipo: 'F',
     indicadorIe: 9,
     celular: input.phone?.replace(/\D/g, '') || undefined,
-    email: input.email?.trim() || undefined
+    email: input.email?.trim() || undefined,
+    endereco: { geral: { endereco: input.address.street, cep: input.address.postalCode, bairro: input.address.neighborhood, municipio: input.address.city, uf: input.address.state, numero: input.address.number, complemento: input.address.complement || undefined } }
   };
   const response = await blingRequest('/contatos', { method: 'POST', body: JSON.stringify(payload) });
   const body = await response.json().catch(() => ({})) as { data?: { id?: string | number }; message?: string; error?: unknown };
