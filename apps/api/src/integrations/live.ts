@@ -564,6 +564,9 @@ const fidelizeiFetch = async (path: string, init: RequestInit = {}) => {
 };
 const fidelizeiError = async (response: Response, operation: string): Promise<never> => {
   const detail = await response.text();
+  if (response.status === 409 && operation === 'consumo do cupom' && /c[oó]digo.*j[aá].*utilizad/i.test(detail)) {
+    throw new Error(`Fidelizei: o cupom informado já consta como utilizado; nenhum desconto foi aplicado a este pedido. Confira o histórico do cupom no Fidelizei antes de tentar novamente${detail ? `: ${detail.slice(0, 180)}` : ''}`);
+  }
   const guidance: Record<number, string> = {
     400: 'dados inválidos',
     401: 'chave inválida, vencida ou revogada',
