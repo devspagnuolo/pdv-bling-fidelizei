@@ -122,6 +122,7 @@ function App() {
   const [customerSaving, setCustomerSaving] = useState(false);
   const [customer, setCustomer] = useState<CustomerLookup>();
   const [coupon, setCoupon] = useState('');
+  const [couponApplying, setCouponApplying] = useState(false);
   const [sale, setSale] = useState<any>();
   const activeSaleRef = useRef<any>(undefined);
   const draftQueueRef = useRef<Promise<any>>(Promise.resolve());
@@ -698,17 +699,27 @@ function App() {
     return saveDraft(items);
   };
   const applyCoupon = async () => {
-    const activeSale = await create();
-    if (!activeSale) return;
-    const r = await apiFetch(`${api}/sales/${activeSale.id}/coupon`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ code: coupon })
-    });
-    const data = await r.json();
-    if (!r.ok) return setMessage(data.message);
-    setSale(data);
-    setMessage('Cupom Fidelizei consumido e aplicado à venda.');
+    if (couponApplying) return;
+    setCouponApplying(true);
+    try {
+      const activeSale = await create();
+      if (!activeSale) return;
+      const r = await apiFetch(`${api}/sales/${activeSale.id}/coupon`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ code: coupon })
+      });
+      const data = await r.json();
+      if (!r.ok) return setMessage(data.message ?? 'Não foi possível validar o cupom Fidelizei.');
+      setSale(data);
+      setMessage(data.draftSyncStatus === 'PENDING'
+        ? 'Cupom confirmado pelo Fidelizei e desconto salvo no pedido. A atualização do rascunho no Bling ficou pendente e será tentada novamente ao finalizar.'
+        : 'Cupom confirmado pelo Fidelizei e desconto aplicado ao pedido.');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Não foi possível validar o cupom Fidelizei.');
+    } finally {
+      setCouponApplying(false);
+    }
   };
   const complete = async () => {
     if (completing) return;
@@ -1157,7 +1168,7 @@ function App() {
               </div>
             </div>
           </section>}
-          <label>Cupom Fidelizei<div className="row"><input disabled={!loyaltyCustomer} value={coupon} onChange={e => setCoupon(e.target.value.toUpperCase())} placeholder={loyaltyCustomer ? 'Digite o código do cupom' : 'Disponível para clientes Fidelizei'} /><button disabled={!loyaltyCustomer || !coupon} onClick={applyCoupon}>Aplicar cupom</button></div></label>
+          <label>Cupom Fidelizei<div className="row"><input disabled={!loyaltyCustomer || couponApplying || Boolean(sale?.coupon)} value={coupon} onChange={e => setCoupon(e.target.value.toUpperCase())} placeholder={loyaltyCustomer ? 'Digite o código do cupom' : 'Disponível para clientes Fidelizei'} /><button disabled={!loyaltyCustomer || !coupon || couponApplying || Boolean(sale?.coupon)} onClick={applyCoupon}>{couponApplying ? 'Validando…' : sale?.coupon ? 'Cupom aplicado' : 'Aplicar cupom'}</button></div></label>
           <div className="nav-actions"><button className="secondary" onClick={() => setStep('product')}>Voltar</button><button className="next" disabled={!items.length} onClick={() => setStep('payment')}>{customer?.found ? 'Continuar para pagamento' : 'Continuar como Consumidor Final'}</button></div>
         </>}
 
