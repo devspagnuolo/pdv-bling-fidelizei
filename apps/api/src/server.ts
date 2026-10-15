@@ -774,21 +774,82 @@ app.get('/sales/:id', async (req) => {
   if (!sale) throw Object.assign(new Error('Venda não encontrada'), { statusCode: 404 });
   return sale;
 });
+const couponApplications = new Map<string, { code: string; promise: Promise<Sale> }>();
 app.post('/sales/:id/coupon', async (req) => {
-  const sale = await getSale((req.params as { id: string }).id);
-  const { code } = req.body as { code: string };
+  let sale = await getSale((req.params as { id: string }).id);
+  const rawCode = (req.body as { code?: string } | undefined)?.code;
+  const code = String(rawCode ?? '').trim().toUpperCase();
+  if (!code) return badRequest('Informe o código do cupom Fidelizei');
   const fidelizeiCustomer = sale?.customer?.fidelizei;
   if (!sale || !fidelizeiCustomer) return badRequest('Cliente não cadastrado no Fidelizei');
-  const reservation = await fidelizei.validateAndReserve(code, sale.id, sale.subtotal);
-  Object.assign(sale, {
-    coupon: reservation.coupon,
-    reservationId: reservation.reservationId,
-    ...calculate(sale.items, (sale.manualDiscount ?? 0) + reservation.coupon.discount, sale.freight ?? 0)
-  });
-  const session = await cashSessionById(sale.cashSessionId);
-  if (session && sale.blingOrderId) await bling.updateOrder(sale.blingOrderId, blingOrderInput(sale, session, []));
-  await persist(sale);
-  return sale;
+  if (sale.status !== 'OPEN') return conflict('Este pedido não está aberto para aplicar cupom');
+  if (sale.coupon) {
+    if (sale.coupon.code.trim().toUpperCase() === code) return sale;
+    return conflict('Este pedido já possui um cupom aplicado');
+  }
+  const pending = couponApplications.get(sale.id);
+  if (pending) {
+    if (pending.code !== code) return conflict('Já existe uma validação de cupom em andamento para este pedido');
+    return pending.promise;
+  }
+
+  const promise = (async () => {
+    const databaseClient = pool ? await pool.connect() : undefined;
+    let lockAcquired = false;
+    try {
+      if (databaseClient) {
+        await databaseClient.query('select pg_advisory_lock(hashtext($1))', [sale.id]);
+        lockAcquired = true;
+        const refreshed = await databaseClient.query('select data from pdv_sales where id = $1', [sale.id]) as { rows: { data: Sale }[] };
+        if (refreshed.rows[0]) {
+          sale = refreshed.rows[0].data;
+          sales.set(sale.id, sale);
+        }
+      }
+
+      if (sale.coupon) {
+        if (sale.coupon.code.trim().toUpperCase() === code) return sale;
+        return conflict('Este pedido já possui um cupom aplicado');
+      }
+      if (sale.status !== 'OPEN' || !sale.customer?.fidelizei) return conflict('Este pedido não está aberto ou não possui cliente Fidelizei vinculado');
+
+      // Fidelizei consome o cupom nesta chamada; grave o desconto local imediatamente
+      // para não perdê-lo caso a sincronização do rascunho do Bling falhe.
+      const redemption = await fidelizei.validateAndReserve(code, sale.id, sale.subtotal);
+      Object.assign(sale, {
+        coupon: redemption.coupon,
+        reservationId: redemption.reservationId,
+        ...calculate(sale.items, (sale.manualDiscount ?? 0) + redemption.coupon.discount, sale.freight ?? 0)
+      });
+      await persist(sale);
+
+      const session = await cashSessionById(sale.cashSessionId);
+      if (session && sale.blingOrderId) {
+        try {
+          await bling.updateOrder(sale.blingOrderId, blingOrderInput(sale, session, []));
+          sale.draftSyncStatus = 'SYNCED';
+          sale.draftSyncError = undefined;
+        } catch (error) {
+          sale.draftSyncStatus = 'PENDING';
+          sale.draftSyncError = error instanceof Error ? error.message.slice(0, 700) : 'Falha ao atualizar o rascunho no Bling';
+          app.log.warn({ error, saleId: sale.id, blingOrderId: sale.blingOrderId }, 'Cupom consumido; rascunho do Bling pendente de atualização');
+        }
+        await persist(sale);
+      }
+      return sale;
+    } finally {
+      if (databaseClient) {
+        if (lockAcquired) await databaseClient.query('select pg_advisory_unlock(hashtext($1))', [sale.id]).catch(() => undefined);
+        databaseClient.release();
+      }
+    }
+  })();
+  couponApplications.set(sale.id, { code, promise });
+  try {
+    return await promise;
+  } finally {
+    if (couponApplications.get(sale.id)?.promise === promise) couponApplications.delete(sale.id);
+  }
 });
 const processingSales = new Set<string>();
 const claimSaleForCompletion = async (id: string, fallback: Sale) => {
