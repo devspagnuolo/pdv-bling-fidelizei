@@ -111,6 +111,13 @@ function App() {
   const [customerName, setCustomerName] = useState('');
   const [customerPhone, setCustomerPhone] = useState('');
   const [customerEmail, setCustomerEmail] = useState('');
+  const [customerPostalCode, setCustomerPostalCode] = useState('');
+  const [customerStreet, setCustomerStreet] = useState('');
+  const [customerAddressNumber, setCustomerAddressNumber] = useState('');
+  const [customerAddressComplement, setCustomerAddressComplement] = useState('');
+  const [customerNeighborhood, setCustomerNeighborhood] = useState('');
+  const [customerCity, setCustomerCity] = useState('');
+  const [customerState, setCustomerState] = useState('');
   const [customerSaving, setCustomerSaving] = useState(false);
   const [customer, setCustomer] = useState<CustomerLookup>();
   const [coupon, setCoupon] = useState('');
@@ -606,13 +613,16 @@ function App() {
   };
   const registerBlingCustomer = async () => {
     if (!customerName.trim() || cpf.replace(/\D/g, '').length !== 11) return setMessage('Informe nome e CPF válido para cadastrar no Bling.');
+    if (customerPostalCode.replace(/\D/g, '').length !== 8 || !customerStreet.trim() || !customerAddressNumber.trim() || !customerNeighborhood.trim() || !customerCity.trim() || !/^[A-Za-z]{2}$/.test(customerState.trim())) {
+      return setMessage('Informe o endereço completo: CEP, logradouro, número, bairro, município e UF.');
+    }
     setCustomerSaving(true);
     setMessage('');
     try {
       const response = await apiFetch(`${api}/customers/bling`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ name: customerName, cpf, phone: customerPhone, email: customerEmail })
+        body: JSON.stringify({ name: customerName, cpf, phone: customerPhone, email: customerEmail, address: { postalCode: customerPostalCode, street: customerStreet, number: customerAddressNumber, complement: customerAddressComplement, neighborhood: customerNeighborhood, city: customerCity, state: customerState } })
       });
       const data = await response.json().catch(() => undefined);
       if (!response.ok) throw new Error(data?.message ?? 'Não foi possível cadastrar o cliente no Bling.');
@@ -1093,16 +1103,23 @@ function App() {
           </div> : customer ? <div className="empty-state">Cliente não localizado. Cadastre no Bling abaixo ou continue como Consumidor Final.</div> : null}
           {customer && !customer.bling && customer.systems.bling !== 'UNAVAILABLE' && <section className="customer-registration">
             <div className="customer-registration-heading">
-              <div><small>CADASTRO RÁPIDO</small><h3>Cadastrar cliente</h3><p>Salve no Bling e, com autorização da cliente, também no Fidelizei.</p></div>
+              <div><small>CADASTRO RÁPIDO</small><h3>Cadastrar cliente</h3><p>O endereço completo será salvo no Bling para uso em notas fiscais. Com autorização da cliente, o cadastro também pode ir para o Fidelizei.</p></div>
               <span className="registration-destination">{programConsent ? 'Bling + Fidelizei' : 'Bling'}</span>
             </div>
             <div className="customer-registration-grid">
               <label className="customer-field customer-name">Nome completo<input value={customerName} onChange={event => setCustomerName(event.target.value)} placeholder="Nome completo da cliente" /></label>
               <label className="customer-field customer-phone">Celular<input value={customerPhone} onChange={event => setCustomerPhone(event.target.value)} placeholder="(11) 99999-9999" inputMode="tel" /></label>
               <label className="customer-field customer-email">E-mail<input value={customerEmail} onChange={event => setCustomerEmail(event.target.value)} placeholder="cliente@email.com" type="email" /></label>
+              <label className="customer-field customer-address-cep">CEP<input value={customerPostalCode} onChange={event => setCustomerPostalCode(event.target.value)} placeholder="00000-000" inputMode="numeric" maxLength={9} autoComplete="postal-code" /></label>
+              <label className="customer-field customer-address-street">Logradouro<input value={customerStreet} onChange={event => setCustomerStreet(event.target.value)} placeholder="Rua, avenida..." autoComplete="address-line1" /></label>
+              <label className="customer-field customer-address-number">Número<input value={customerAddressNumber} onChange={event => setCustomerAddressNumber(event.target.value)} placeholder="Nº" /></label>
+              <label className="customer-field customer-address-complement">Complemento (opcional)<input value={customerAddressComplement} onChange={event => setCustomerAddressComplement(event.target.value)} placeholder="Apto, sala..." autoComplete="address-line2" /></label>
+              <label className="customer-field customer-address-neighborhood">Bairro<input value={customerNeighborhood} onChange={event => setCustomerNeighborhood(event.target.value)} placeholder="Bairro" autoComplete="address-level3" /></label>
+              <label className="customer-field customer-address-city">Município<input value={customerCity} onChange={event => setCustomerCity(event.target.value)} placeholder="Cidade" autoComplete="address-level2" /></label>
+              <label className="customer-field customer-address-state">UF<input value={customerState} onChange={event => setCustomerState(event.target.value.toUpperCase().slice(0, 2))} placeholder="SP" maxLength={2} autoComplete="address-level1" /></label>
               <div className="customer-registration-footer">
                 <label className="consent-check"><input type="checkbox" checked={programConsent} onChange={event => setProgramConsent(event.target.checked)} /><span><b>Cadastrar também no Fidelizei</b><small>A cliente autorizou a adesão e o envio do acesso provisório por e-mail.</small></span></label>
-                <button className="finish" disabled={customerSaving || !customerName.trim()} onClick={() => void registerBlingCustomer()}>{customerSaving ? 'Salvando…' : programConsent ? 'Cadastrar no Bling + Fidelizei' : 'Cadastrar no Bling'}</button>
+                <button className="finish" disabled={customerSaving || !customerName.trim() || customerPostalCode.replace(/\D/g, '').length !== 8 || !customerStreet.trim() || !customerAddressNumber.trim() || !customerNeighborhood.trim() || !customerCity.trim() || !/^[A-Za-z]{2}$/.test(customerState.trim())} onClick={() => void registerBlingCustomer()}>{customerSaving ? 'Salvando…' : programConsent ? 'Cadastrar no Bling + Fidelizei' : 'Cadastrar no Bling'}</button>
               </div>
             </div>
           </section>}
