@@ -118,6 +118,7 @@ function App() {
   const [customerNeighborhood, setCustomerNeighborhood] = useState('');
   const [customerCity, setCustomerCity] = useState('');
   const [customerState, setCustomerState] = useState('');
+  const [customerCepLookup, setCustomerCepLookup] = useState<'idle' | 'loading' | 'found' | 'not-found' | 'error'>('idle');
   const [customerSaving, setCustomerSaving] = useState(false);
   const [customer, setCustomer] = useState<CustomerLookup>();
   const [coupon, setCoupon] = useState('');
@@ -187,6 +188,39 @@ function App() {
     }
     return response;
   };
+
+  useEffect(() => {
+    const postalCode = customerPostalCode.replace(/\D/g, '');
+    if (postalCode.length !== 8) {
+      setCustomerCepLookup('idle');
+      return;
+    }
+    const controller = new AbortController();
+    const timeout = window.setTimeout(async () => {
+      setCustomerCepLookup('loading');
+      try {
+        const response = await fetch(`https://viacep.com.br/ws/${postalCode}/json/`, { signal: controller.signal });
+        if (!response.ok) throw new Error('Falha na consulta do CEP');
+        const address = await response.json() as { erro?: boolean; logradouro?: string; bairro?: string; localidade?: string; uf?: string };
+        if (address.erro) {
+          setCustomerCepLookup('not-found');
+          return;
+        }
+        setCustomerStreet(address.logradouro ?? '');
+        setCustomerNeighborhood(address.bairro ?? '');
+        setCustomerCity(address.localidade ?? '');
+        setCustomerState(address.uf ?? '');
+        setCustomerCepLookup('found');
+      } catch (error) {
+        if (error instanceof Error && error.name === 'AbortError') return;
+        setCustomerCepLookup('error');
+      }
+    }, 250);
+    return () => {
+      window.clearTimeout(timeout);
+      controller.abort();
+    };
+  }, [customerPostalCode]);
 
   useEffect(() => { activeSaleRef.current = sale; }, [sale]);
 
@@ -1110,7 +1144,7 @@ function App() {
               <label className="customer-field customer-name">Nome completo<input value={customerName} onChange={event => setCustomerName(event.target.value)} placeholder="Nome completo da cliente" /></label>
               <label className="customer-field customer-phone">Celular<input value={customerPhone} onChange={event => setCustomerPhone(event.target.value)} placeholder="(11) 99999-9999" inputMode="tel" /></label>
               <label className="customer-field customer-email">E-mail<input value={customerEmail} onChange={event => setCustomerEmail(event.target.value)} placeholder="cliente@email.com" type="email" /></label>
-              <label className="customer-field customer-address-cep">CEP<input value={customerPostalCode} onChange={event => setCustomerPostalCode(event.target.value)} placeholder="00000-000" inputMode="numeric" maxLength={9} autoComplete="postal-code" /></label>
+              <label className="customer-field customer-address-cep">CEP<input value={customerPostalCode} onChange={event => setCustomerPostalCode(event.target.value.replace(/\D/g, '').slice(0, 8).replace(/^(\d{5})(\d)/, '$1-$2'))} placeholder="00000-000" inputMode="numeric" maxLength={9} autoComplete="postal-code" />{customerCepLookup !== 'idle' && <small className={`customer-cep-hint ${customerCepLookup}`}>{customerCepLookup === 'loading' ? 'Buscando CEP…' : customerCepLookup === 'found' ? 'Endereço preenchido; informe o número.' : customerCepLookup === 'not-found' ? 'CEP não localizado. Preencha o endereço manualmente.' : 'Consulta indisponível. Preencha o endereço manualmente.'}</small>}</label>
               <label className="customer-field customer-address-street">Logradouro<input value={customerStreet} onChange={event => setCustomerStreet(event.target.value)} placeholder="Rua, avenida..." autoComplete="address-line1" /></label>
               <label className="customer-field customer-address-number">Número<input value={customerAddressNumber} onChange={event => setCustomerAddressNumber(event.target.value)} placeholder="Nº" /></label>
               <label className="customer-field customer-address-complement">Complemento (opcional)<input value={customerAddressComplement} onChange={event => setCustomerAddressComplement(event.target.value)} placeholder="Apto, sala..." autoComplete="address-line2" /></label>
