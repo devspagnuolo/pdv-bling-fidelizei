@@ -7,7 +7,12 @@ declare module 'pg' {
   };
   type PoolInstance = {
     query: (text: string, values?: unknown[]) => Promise<unknown>;
+    connect: () => Promise<ClientInstance>;
     end: () => Promise<void>;
+  };
+  type ClientInstance = {
+    query: (text: string, values?: unknown[]) => Promise<unknown>;
+    release: () => void;
   };
   const pg: { Pool: new (options: PoolOptions) => PoolInstance };
   export default pg;
