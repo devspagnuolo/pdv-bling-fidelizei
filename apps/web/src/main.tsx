@@ -712,9 +712,11 @@ function App() {
       const data = await r.json();
       if (!r.ok) return setMessage(data.message ?? 'Não foi possível validar o cupom Fidelizei.');
       setSale(data);
+      const applied = brl.format(data.coupon?.discount ?? 0);
+      const finalTotal = brl.format(data.total ?? 0);
       setMessage(data.draftSyncStatus === 'PENDING'
-        ? 'Cupom confirmado pelo Fidelizei e desconto salvo no pedido. A atualização do rascunho no Bling ficou pendente e será tentada novamente ao finalizar.'
-        : 'Cupom confirmado pelo Fidelizei e desconto aplicado ao pedido.');
+        ? `Cupom aplicado: ${applied} de desconto; total ${finalTotal}. Confira a sincronização com o Bling antes de finalizar.`
+        : `Cupom aplicado: ${applied} de desconto; total ${finalTotal}.`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Não foi possível validar o cupom Fidelizei.');
     } finally {
@@ -1168,7 +1170,7 @@ function App() {
               </div>
             </div>
           </section>}
-          <label>Cupom Fidelizei<div className="row"><input disabled={!loyaltyCustomer || couponApplying || Boolean(sale?.coupon)} value={coupon} onChange={e => setCoupon(e.target.value.toUpperCase())} placeholder={loyaltyCustomer ? 'Digite o código do cupom' : 'Disponível para clientes Fidelizei'} /><button disabled={!loyaltyCustomer || !coupon || couponApplying || Boolean(sale?.coupon)} onClick={applyCoupon}>{couponApplying ? 'Validando…' : sale?.coupon ? 'Cupom aplicado' : 'Aplicar cupom'}</button></div></label>
+          <label>Cupom Fidelizei<div className="row"><input disabled={!loyaltyCustomer || couponApplying || Boolean(sale?.coupon)} value={coupon} onChange={e => setCoupon(e.target.value.toUpperCase())} placeholder={loyaltyCustomer ? 'Digite o código do cupom' : 'Disponível para clientes Fidelizei'} /><button disabled={!loyaltyCustomer || !coupon || couponApplying || Boolean(sale?.coupon)} onClick={applyCoupon}>{couponApplying ? 'Validando…' : sale?.coupon ? 'Cupom aplicado' : 'Aplicar cupom'}</button></div>{sale?.coupon && <small>Desconto do cupom: {brl.format(sale.coupon.discount)} · Total da venda: {brl.format(sale.total)}</small>}</label>
           <div className="nav-actions"><button className="secondary" onClick={() => setStep('product')}>Voltar</button><button className="next" disabled={!items.length} onClick={() => setStep('payment')}>{customer?.found ? 'Continuar para pagamento' : 'Continuar como Consumidor Final'}</button></div>
         </>}
 
