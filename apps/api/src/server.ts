@@ -575,11 +575,20 @@ app.get('/operations/pending', async (req) => {
 
 app.get('/customers/:cpf', async (req) => lookupCustomer((req.params as { cpf: string }).cpf));
 app.post('/customers/bling', async (req) => {
-  const body = req.body as { name?: string; cpf?: string; phone?: string; email?: string };
+  const body = req.body as { name?: string; cpf?: string; phone?: string; email?: string; address?: { postalCode?: string; street?: string; number?: string; complement?: string; neighborhood?: string; city?: string; state?: string } };
   const cpf = body.cpf?.replace(/\D/g, '') ?? '';
   if (!body.name?.trim() || cpf.length !== 11) return badRequest('Nome e CPF válido são obrigatórios para cadastrar no Bling');
   if (body.email && !/^\S+@\S+\.\S+$/.test(body.email.trim())) return badRequest('Informe um e-mail válido ou deixe o campo vazio');
-  return bling.createCustomer({ name: body.name.trim().slice(0, 120), cpf, phone: body.phone?.trim(), email: body.email?.trim() });
+  const address = body.address;
+  const postalCode = address?.postalCode?.replace(/\D/g, '') ?? '';
+  const state = address?.state?.trim() ?? '';
+  if (postalCode.length !== 8 || !address?.street?.trim() || !address.number?.trim() || !address.neighborhood?.trim() || !address.city?.trim() || !/^[A-Za-z]{2}$/.test(state)) {
+    return badRequest('Endereço completo obrigatório: CEP válido, logradouro, número, bairro, município e UF');
+  }
+  return bling.createCustomer({
+    name: body.name.trim().slice(0, 120), cpf, phone: body.phone?.trim(), email: body.email?.trim(),
+    address: { postalCode, street: address.street.trim().slice(0, 150), number: address.number.trim().slice(0, 20), complement: address.complement?.trim().slice(0, 100), neighborhood: address.neighborhood.trim().slice(0, 100), city: address.city.trim().slice(0, 100), state: state.toUpperCase() }
+  });
 });
 app.post('/customers/fidelizei', async (req) => {
   const body = req.body as { name: string; cpf: string; phone?: string; email?: string; programConsent: boolean };
