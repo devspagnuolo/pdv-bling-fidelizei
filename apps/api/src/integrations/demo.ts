@@ -256,16 +256,21 @@ export const getFidelizeiConnectionStatus = async () => {
 
 export const fidelizei = {
   findCustomer: async (cpf: string) => cpf.replace(/\D/g, '') === fidelizeiCustomer.cpf ? fidelizeiCustomer : undefined,
-  validateAndReserve: async (code: string, customerId: string, subtotal: number) => {
+  previewCoupon: async (code: string, _orderNumber: string, subtotal: number, customerCpf: string) => {
     const coupon = fidelizeiCustomer.coupons.find(c => c.code === code.toUpperCase());
-    if (!coupon || customerId !== fidelizeiCustomer.id || subtotal < coupon.discount) {
+    if (!coupon || customerCpf !== fidelizeiCustomer.cpf || subtotal < coupon.discount) {
       throw new Error('Cupom inválido para esta compra');
     }
     return {
       coupon,
-      reservationId: `reserve-${coupon.id}-${Date.now()}`,
-      expiresAt: new Date(Date.now() + 10 * 60_000).toISOString()
+      customerCpf,
+      status: 'ready_for_use',
+      expectedReward: { discountType: 'fixed' as const, discountValue: coupon.discount * 100, minimumOrderCents: 0 }
     };
+  },
+  consumeCoupon: async (code: string, orderNumber: string, subtotal: number, customerCpf: string, _expectedReward: { discountType: 'percent' | 'fixed'; discountValue: number; minimumOrderCents: number }) => {
+    const preview = await fidelizei.previewCoupon(code, orderNumber, subtotal, customerCpf);
+    return preview;
   },
   consumeReservation: async (reservationId: string, saleId: string) => ({
     transactionId: `fid-tx-${saleId}`,
