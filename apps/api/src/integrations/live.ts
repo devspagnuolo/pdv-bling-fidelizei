@@ -239,7 +239,7 @@ const findFinalConsumerId = async () => {
   finalConsumerCache = { expires: Date.now() + 10 * 60_000, id };
   return id;
 };
-type SalesOrderInput = { customerId?: string; sellerId: string; salesChannelId?: string; businessUnitId?: string; categoryId?: string; items: SaleItem[]; discount: number; freight: number; observations?: string; payments: PaymentSplit[]; idempotencyKey: string; statusId?: string };
+type SalesOrderInput = { customerId?: string; sellerId: string; salesChannelId?: string; businessUnitId?: string; categoryId?: string; items: SaleItem[]; discount: number; freight: number; observations?: string; payments: PaymentSplit[]; idempotencyKey: string; statusId?: string; clearDiscount?: boolean };
 const buildOrderPayload = async (input: SalesOrderInput) => {
   const customerId = input.customerId ?? await findFinalConsumerId();
   const orderDate = saoPauloDate();
@@ -263,7 +263,7 @@ const buildOrderPayload = async (input: SalesOrderInput) => {
       quantidade: item.quantity,
       valor: item.unitPrice
     })),
-    desconto: input.discount > 0
+    desconto: input.discount > 0 || input.clearDiscount
       ? { valor: Math.round(input.discount * 100) / 100, unidade: 'REAL' }
       : undefined,
     transporte: input.freight ? { fretePorConta: 0, frete: input.freight } : undefined,
@@ -288,7 +288,7 @@ const readOrderDetails = async (id: string, isReady?: (details: Record<string, u
 };
 const readOrderNumber = async (id: string) => textValue((await readOrderDetails(id, details => Boolean(textValue(details.numero))))?.numero);
 const verifyOrderDiscount = (details: Record<string, unknown> | undefined, input: SalesOrderInput) => {
-  if (input.discount <= 0) return;
+  if (input.discount <= 0 && !input.clearDiscount) return;
   if (!details) throw new Error('Bling aceitou a atualização, mas não foi possível confirmar o desconto salvo no pedido');
   const discount = details.desconto as Record<string, unknown> | undefined;
   const actualDiscount = numericValue(discount?.valor);
@@ -327,7 +327,7 @@ const updateOrder = async (orderId: string, input: SalesOrderInput) => {
   const subtotal = input.items.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0);
   const expectedTotal = Math.round(Math.max(0, subtotal - expectedDiscount + input.freight) * 100) / 100;
   const details = await readOrderDetails(orderId, detail => {
-    if (input.discount <= 0) return true;
+    if (input.discount <= 0 && !input.clearDiscount) return true;
     const discount = detail.desconto as Record<string, unknown> | undefined;
     const actualDiscount = numericValue(discount?.valor);
     const actualTotal = numericValue(detail.total, Number.NaN);
@@ -576,10 +576,10 @@ const fidelizeiConfig = () => {
   if (!key) throw new Error('FIDELIZEI_API_KEY não configurada');
   return { url, key };
 };
-const fidelizeiFetch = async (path: string, init: RequestInit = {}) => {
+const fidelizeiFetch = async (path: string, init: RequestInit = {}, retry = true) => {
   const { url, key } = fidelizeiConfig();
   let response: Response | undefined;
-  for (let attempt = 0; attempt < 4; attempt += 1) {
+  for (let attempt = 0; attempt < (retry ? 4 : 1); attempt += 1) {
     response = await fetch(`${url}${path}`, {
       ...init,
       headers: {
@@ -615,58 +615,33 @@ const fidelizeiError = async (response: Response, operation: string): Promise<ne
 const unwrap = (payload: unknown) => (payload as { data?: unknown })?.data ?? payload;
 const asRecord = (value: unknown): Record<string, unknown> | undefined =>
   value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
-const firstDefined = (record: Record<string, unknown>, keys: string[]) => {
-  for (const key of keys) if (record[key] !== undefined && record[key] !== null && record[key] !== '') return { key, value: record[key] };
-  return undefined;
-};
 const parseCouponDiscount = (data: Record<string, unknown>, subtotal: number) => {
-  const redemption = asRecord(data.redemption);
-  const coupon = asRecord(data.coupon ?? data.cupom);
-  const candidates = [
-    asRecord(data.reward), asRecord(data.recompensa), asRecord(data.rewardData),
-    asRecord(redemption?.reward), asRecord(redemption?.recompensa),
-    asRecord(coupon?.reward), asRecord(coupon?.recompensa),
-    asRecord(data.benefit), asRecord(data.beneficio), coupon, redemption, data
-  ].filter((candidate): candidate is Record<string, unknown> => Boolean(candidate));
-  const ruleKeys = ['discountType', 'discount_type', 'tipoDesconto', 'tipo_desconto', 'discountValue', 'discount_value', 'discountAmount', 'discount_amount', 'discountPercentage', 'percentage', 'percentual'];
-  const reward = candidates.find(candidate => ruleKeys.some(key => candidate[key] !== undefined)) ?? candidates[0] ?? data;
-  const nestedDiscount = asRecord(reward.discount) ?? asRecord(reward.benefit) ?? asRecord(reward.beneficio);
-  const rule = nestedDiscount ? { ...reward, ...nestedDiscount } : reward;
-
-  const minimumInCents = firstDefined(rule, ['minimumOrderCents', 'minimumBasketCents', 'minOrderCents', 'valorMinimoCentavos']);
-  const minimumInCurrency = firstDefined(rule, ['minimumOrderValue', 'minimumOrderAmount', 'minOrderValue', 'minimumBasketValue', 'valorMinimoPedido', 'pedidoMinimo']);
-  const minimum = minimumInCents
-    ? numericValue(minimumInCents.value) / 100
-    : minimumInCurrency ? numericValue(minimumInCurrency.value) : 0;
-  if (subtotal + 0.0001 < minimum) {
-    throw new Error(`Fidelizei: pedido abaixo do mínimo de R$ ${minimum.toFixed(2)} exigido pelo cupom`);
+  const reward = asRecord(data.reward);
+  const customer = asRecord(data.customer);
+  const type = reward?.discountType;
+  const value = reward?.discountValue;
+  const minimumOrderCents = reward?.minimumOrderCents ?? 0;
+  if ((type !== 'percent' && type !== 'fixed') || !Number.isInteger(value) || Number(value) <= 0 ||
+      !Number.isInteger(minimumOrderCents) || Number(minimumOrderCents) < 0 ||
+      (type === 'percent' && Number(value) > 100)) {
+    throw new Error('Fidelizei: a recompensa não possui uma regra de desconto válida');
   }
-
-  const typeEntry = firstDefined(rule, ['discountType', 'discount_type', 'tipoDesconto', 'tipo_desconto', 'type', 'kind', 'tipo']) ??
-    firstDefined(nestedDiscount ?? {}, ['discountType', 'tipoDesconto', 'type', 'kind', 'tipo']);
-  const type = String(typeEntry?.value ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
-  const percentKeys = ['discountPercentage', 'discount_percentage', 'percentage', 'percent', 'percentOff', 'percent_off', 'percentageOff', 'percentage_off', 'percentualDesconto', 'percentual_desconto', 'descontoPercentual', 'desconto_percentual', 'porcentagem'];
-  const centsKeys = ['discountValueCents', 'discount_value_cents', 'amountCents', 'amount_cents', 'valueCents', 'value_cents'];
-  const legacyCentsKeys = ['discountValue', 'discount_value'];
-  const currencyKeys = ['discountAmount', 'discount_amount', 'amountOff', 'amount_off', 'fixedAmount', 'fixed_amount', 'value', 'amount', 'valorDesconto', 'valor_desconto', 'descontoValor', 'desconto_valor', 'valor', 'desconto'];
-  const percentEntry = firstDefined(rule, percentKeys) ?? firstDefined(nestedDiscount ?? {}, percentKeys);
-  const amountEntry = percentEntry ? undefined : firstDefined(rule, centsKeys) ?? firstDefined(rule, legacyCentsKeys) ?? firstDefined(rule, currencyKeys) ??
-    firstDefined(nestedDiscount ?? {}, centsKeys) ?? firstDefined(nestedDiscount ?? {}, legacyCentsKeys) ?? firstDefined(nestedDiscount ?? {}, currencyKeys);
-  const isPercent = Boolean(percentEntry) || /percent|percentage|percentual|porcent|(^|[^a-z])pct([^a-z]|$)|%/.test(type);
-  const selected = isPercent ? percentEntry ?? amountEntry : amountEntry;
-  if (!selected) throw new Error('Fidelizei: regra do cupom não retornou o valor do desconto');
-  const value = numericValue(selected.value, Number.NaN);
-  if (!Number.isFinite(value) || value <= 0) throw new Error('Fidelizei: valor de desconto do cupom inválido');
-
-  const valueUnit = String(rule.discountUnit ?? rule.valueUnit ?? rule.unit ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
-  const isCents = centsKeys.includes(selected.key) || /centavos|cents?/.test(valueUnit) ||
-    (legacyCentsKeys.includes(selected.key) && !/real|currency|moeda|brl|r\$/.test(valueUnit));
-  const amountInCurrency = isPercent
-    ? subtotal * value / 100
-    : isCents ? value / 100 : value;
-  const discount = Math.round(Math.min(subtotal, amountInCurrency) * 100) / 100;
+  if (Math.round(subtotal * 100) < Number(minimumOrderCents)) {
+    throw new Error(`Fidelizei: pedido abaixo do mínimo de R$ ${(Number(minimumOrderCents) / 100).toFixed(2)} exigido pelo cupom`);
+  }
+  const amount = type === 'percent' ? subtotal * Number(value) / 100 : Number(value) / 100;
+  const discount = Math.round(Math.min(subtotal, amount) * 100) / 100;
   if (discount <= 0) throw new Error('Fidelizei: o cupom não possui desconto aplicável a este pedido');
-  return { reward, discount };
+  const customerCpf = textValue(customer?.cpf)?.replace(/\D/g, '');
+  if (!customerCpf) throw new Error('Fidelizei: não foi possível confirmar a cliente dona do cupom');
+  const expectedReward = { discountType: type as 'percent' | 'fixed', discountValue: Number(value), minimumOrderCents: Number(minimumOrderCents) };
+  const coupon: Coupon = {
+    id: textValue(data.id) ?? '',
+    code: '',
+    description: textValue(reward?.name) ?? 'Cupom Fidelizei',
+    discount
+  };
+  return { coupon, customerCpf, expectedReward, status: textValue(data.status) };
 };
 const mapFidelizeiCustomer = (payload: unknown, cpf: string): FidelizeiCustomer | undefined => {
   const raw = unwrap(payload) as Record<string, unknown> | undefined;
@@ -730,21 +705,33 @@ export const fidelizei = {
     if (!response.ok) return fidelizeiError(response, 'cadastro da cliente');
     return mapFidelizeiCustomer(await response.json(), input.cpf.replace(/\D/g, ''));
   },
-  validateAndReserve: async (code: string, orderNumber: string, subtotal: number) => {
+  previewCoupon: async (code: string, orderNumber: string, subtotal: number, customerCpf: string) => {
+    const normalizedCode = code.trim().toUpperCase();
+    const response = await fidelizeiFetch('/redemptions/preview', {
+      method: 'POST',
+      body: JSON.stringify({ code: normalizedCode, orderNumber, customerCpf, subtotalCents: Math.round(subtotal * 100) })
+    });
+    if (!response.ok) return fidelizeiError(response, 'consulta do cupom');
+    const data = unwrap(await response.json()) as Record<string, unknown>;
+    const preview = parseCouponDiscount(data, subtotal);
+    if (preview.customerCpf !== customerCpf) throw new Error('Fidelizei: este cupom pertence a outra cliente');
+    preview.coupon.id ||= normalizedCode;
+    preview.coupon.code = normalizedCode;
+    return preview;
+  },
+  consumeCoupon: async (code: string, orderNumber: string, subtotal: number, customerCpf: string, expectedReward: { discountType: 'percent' | 'fixed'; discountValue: number; minimumOrderCents: number }) => {
+    const normalizedCode = code.trim().toUpperCase();
     const response = await fidelizeiFetch('/redemptions/consume', {
       method: 'POST',
-      body: JSON.stringify({ code: code.trim().toUpperCase(), orderNumber })
-    });
+      body: JSON.stringify({ code: normalizedCode, orderNumber, customerCpf, subtotalCents: Math.round(subtotal * 100), expectedReward })
+    }, false);
     if (!response.ok) return fidelizeiError(response, 'consumo do cupom');
     const data = unwrap(await response.json()) as Record<string, unknown>;
-    const { reward, discount } = parseCouponDiscount(data, subtotal);
-    const coupon: Coupon = {
-      id: code.trim().toUpperCase(),
-      code: code.trim().toUpperCase(),
-      description: textValue(reward.name ?? reward.description ?? reward.title) ?? 'Cupom Fidelizei',
-      discount
-    };
-    return { coupon, reservationId: `consumed:${coupon.code}`, expiresAt: new Date().toISOString() };
+    const redemption = parseCouponDiscount(data, subtotal);
+    if (redemption.customerCpf !== customerCpf) throw new Error('Fidelizei: este cupom pertence a outra cliente');
+    redemption.coupon.id ||= normalizedCode;
+    redemption.coupon.code = normalizedCode;
+    return redemption;
   },
   reverseSale: async (externalSaleId: string) => {
     const response = await fidelizeiFetch(`/sales/${encodeURIComponent(externalSaleId)}/reverse`, { method: 'POST' });
