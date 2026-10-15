@@ -813,28 +813,62 @@ app.post('/sales/:id/coupon', async (req) => {
       }
       if (sale.status !== 'OPEN' || !sale.customer?.fidelizei) return conflict('Este pedido não está aberto ou não possui cliente Fidelizei vinculado');
 
-      // Fidelizei consome o cupom nesta chamada; grave o desconto local imediatamente
-      // para não perdê-lo caso a sincronização do rascunho do Bling falhe.
-      const redemption = await fidelizei.validateAndReserve(code, sale.id, sale.subtotal);
+            const session = await cashSessionById(sale.cashSessionId);
+      if (!session || session.status !== 'OPEN' || !sale.blingOrderId) return conflict('O pedido precisa estar aberto e salvo no Bling antes de aplicar o cupom');
+      const customerCpf = sale.customer.fidelizei.cpf;
+      const preview = await fidelizei.previewCoupon(code, sale.id, sale.subtotal, customerCpf);
+      const discountedSale: Sale = {
+        ...sale,
+        coupon: preview.coupon,
+        ...calculate(sale.items, (sale.manualDiscount ?? 0) + preview.coupon.discount, sale.freight ?? 0)
+      };
+      // O Bling precisa confirmar o desconto antes que o Fidelizei marque o código como usado.
+      await bling.updateOrder(sale.blingOrderId, blingOrderInput(discountedSale, session, []));
+
+      let redemption;
+      try {
+        redemption = await fidelizei.consumeCoupon(code, sale.id, sale.subtotal, customerCpf, preview.expectedReward);
+      } catch (error) {
+        // Uma resposta perdida pode ocorrer depois do consumo. A prévia identifica
+        // o uso pelo mesmo pedido e a confirmação seguinte é idempotente.
+        try {
+          const current = await fidelizei.previewCoupon(code, sale.id, sale.subtotal, customerCpf);
+          if (current.status === 'used') {
+            redemption = await fidelizei.consumeCoupon(code, sale.id, sale.subtotal, customerCpf, preview.expectedReward);
+          }
+        } catch {
+          // A consulta também pode falhar; a venda fica disponível para reconciliação.
+        }
+        if (!redemption) {
+          try {
+            await bling.updateOrder(sale.blingOrderId, { ...blingOrderInput(sale, session, []), clearDiscount: true });
+            sale.draftSyncStatus = 'SYNCED';
+            sale.draftSyncError = undefined;
+          } catch (rollbackError) {
+            sale.draftSyncStatus = 'PENDING';
+            sale.draftSyncError = rollbackError instanceof Error ? rollbackError.message.slice(0, 700) : 'Falha ao restaurar o pedido no Bling';
+            await persist(sale);
+          }
+          throw error;
+        }
+      }
       Object.assign(sale, {
         coupon: redemption.coupon,
-        reservationId: redemption.reservationId,
+        reservationId: `consumed:${code}`,
         ...calculate(sale.items, (sale.manualDiscount ?? 0) + redemption.coupon.discount, sale.freight ?? 0)
       });
+      sale.draftSyncStatus = 'SYNCED';
+      sale.draftSyncError = undefined;
       await persist(sale);
-
-      const session = await cashSessionById(sale.cashSessionId);
-      if (session && sale.blingOrderId) {
+      if (Math.abs(redemption.coupon.discount - preview.coupon.discount) > 0.009) {
+        // Defesa para versões antigas da API que não aplicam a comparação da regra.
         try {
           await bling.updateOrder(sale.blingOrderId, blingOrderInput(sale, session, []));
-          sale.draftSyncStatus = 'SYNCED';
-          sale.draftSyncError = undefined;
         } catch (error) {
           sale.draftSyncStatus = 'PENDING';
           sale.draftSyncError = error instanceof Error ? error.message.slice(0, 700) : 'Falha ao atualizar o rascunho no Bling';
-          app.log.warn({ error, saleId: sale.id, blingOrderId: sale.blingOrderId }, 'Cupom consumido; rascunho do Bling pendente de atualização');
+          await persist(sale);
         }
-        await persist(sale);
       }
       return sale;
     } finally {
