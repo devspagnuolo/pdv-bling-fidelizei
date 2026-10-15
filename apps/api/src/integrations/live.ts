@@ -263,7 +263,9 @@ const buildOrderPayload = async (input: SalesOrderInput) => {
       quantidade: item.quantity,
       valor: item.unitPrice
     })),
-    desconto: input.discount ? { valor: input.discount, unidade: 'REAL' } : undefined,
+    desconto: input.discount > 0
+      ? { valor: Math.round(input.discount * 100) / 100, unidade: 'REAL' }
+      : undefined,
     transporte: input.freight ? { fretePorConta: 0, frete: input.freight } : undefined,
     observacoes: orderNotes || undefined,
     parcelas: input.payments.map(payment => ({
@@ -273,16 +275,35 @@ const buildOrderPayload = async (input: SalesOrderInput) => {
     }))
   };
 };
-const readOrderNumber = async (id: string) => {
-  let number: string | undefined;
-  for (let attempt = 0; attempt < 3 && !number; attempt += 1) {
+const readOrderDetails = async (id: string, isReady?: (details: Record<string, unknown>) => boolean) => {
+  let details: Record<string, unknown> | undefined;
+  for (let attempt = 0; attempt < 3 && (!details || (isReady && !isReady(details))); attempt += 1) {
     if (attempt) await delay(350 * attempt);
     const detailResponse = await blingRequest(`/pedidos/vendas/${encodeURIComponent(id)}`);
     if (!detailResponse.ok) continue;
     const detailBody = await detailResponse.json().catch(() => ({})) as { data?: Record<string, unknown> };
-    number = textValue(detailBody.data?.numero);
+    if (detailBody.data) details = detailBody.data;
   }
-  return number;
+  return details;
+};
+const readOrderNumber = async (id: string) => textValue((await readOrderDetails(id, details => Boolean(textValue(details.numero))))?.numero);
+const verifyOrderDiscount = (details: Record<string, unknown> | undefined, input: SalesOrderInput) => {
+  if (input.discount <= 0) return;
+  if (!details) throw new Error('Bling aceitou a atualização, mas não foi possível confirmar o desconto salvo no pedido');
+  const discount = details.desconto as Record<string, unknown> | undefined;
+  const actualDiscount = numericValue(discount?.valor);
+  const expectedDiscount = Math.round(input.discount * 100) / 100;
+  if (Math.abs(actualDiscount - expectedDiscount) > 0.009) {
+    throw new Error(`Bling não confirmou o desconto do pedido: esperado R$ ${expectedDiscount.toFixed(2)}, recebido R$ ${actualDiscount.toFixed(2)}`);
+  }
+  const actualTotal = numericValue(details.total, Number.NaN);
+  if (Number.isFinite(actualTotal)) {
+    const subtotal = input.items.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0);
+    const expectedTotal = Math.round(Math.max(0, subtotal - expectedDiscount + input.freight) * 100) / 100;
+    if (Math.abs(actualTotal - expectedTotal) > 0.009) {
+      throw new Error(`Bling salvou o desconto de R$ ${expectedDiscount.toFixed(2)}, mas o total do pedido diverge: esperado R$ ${expectedTotal.toFixed(2)}, recebido R$ ${actualTotal.toFixed(2)}`);
+    }
+  }
 };
 const createOrder = async (input: SalesOrderInput) => {
   const payload = await buildOrderPayload(input);
@@ -302,7 +323,19 @@ const updateOrder = async (orderId: string, input: SalesOrderInput) => {
   const payload = await buildOrderPayload(input);
   const response = await blingRequest(`/pedidos/vendas/${encodeURIComponent(orderId)}`, { method: 'PUT', body: JSON.stringify(payload) });
   if (!response.ok && response.status !== 204) return blingFailure(response, 'atualização do pedido em atendimento');
-  return { id: orderId, number: await readOrderNumber(orderId), status: 'CONFIRMED' as const };
+  const expectedDiscount = Math.round(input.discount * 100) / 100;
+  const subtotal = input.items.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0);
+  const expectedTotal = Math.round(Math.max(0, subtotal - expectedDiscount + input.freight) * 100) / 100;
+  const details = await readOrderDetails(orderId, detail => {
+    if (input.discount <= 0) return true;
+    const discount = detail.desconto as Record<string, unknown> | undefined;
+    const actualDiscount = numericValue(discount?.valor);
+    const actualTotal = numericValue(detail.total, Number.NaN);
+    return Math.abs(actualDiscount - expectedDiscount) <= 0.009 &&
+      (!Number.isFinite(actualTotal) || Math.abs(actualTotal - expectedTotal) <= 0.009);
+  });
+  verifyOrderDiscount(details, input);
+  return { id: orderId, number: textValue(details?.numero), status: 'CONFIRMED' as const };
 };
 
 let categoriesCache: { expires: number; data: { id: string; name: string; type: number; active: boolean; isDefault: boolean }[] } | undefined;
