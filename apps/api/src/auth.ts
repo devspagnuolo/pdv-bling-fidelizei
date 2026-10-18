@@ -4,7 +4,7 @@ import type { FastifyRequest } from 'fastify';
 export type AuthPrincipal = {
   operatorId: string;
   operatorName: string;
-  role: 'OPERATOR' | 'MANAGER';
+  role: 'OPERATOR' | 'MANAGER' | 'ADMIN';
   exp: number;
 };
 
@@ -19,6 +19,7 @@ const sign = (payload: string) => createHmac('sha256', secret()!).update(payload
 
 export const authenticatePin = (pin: string): AuthPrincipal['role'] | undefined => {
   if (!authConfigured()) return undefined;
+  if (process.env.PDV_ADMIN_PIN && safeEqual(pin, process.env.PDV_ADMIN_PIN)) return 'ADMIN';
   if (safeEqual(pin, process.env.PDV_MANAGER_PIN!)) return 'MANAGER';
   if (safeEqual(pin, process.env.PDV_OPERATOR_PIN!)) return 'OPERATOR';
   return undefined;
@@ -45,3 +46,4 @@ export const verifyToken = (token: string | undefined): AuthPrincipal | undefine
 };
 export const principalFromRequest = (req: FastifyRequest) =>
   (req as FastifyRequest & { auth?: AuthPrincipal }).auth;
+

@@ -73,6 +73,37 @@ export const initializeDatabase = async () => {
     created_at timestamptz not null default now()
   )`);
   await pool.query('create index if not exists pdv_cash_operations_session_idx on pdv_cash_operations (session_id, created_at)');
+  await pool.query(`create table if not exists pdv_cash_closing_versions (
+    id uuid primary key, session_id uuid not null references pdv_cash_sessions(id), version integer not null,
+    closing_summary jsonb not null, closed_at timestamptz not null, closed_by text,
+    unique(session_id, version)
+  )`);
+  await pool.query(`create table if not exists pdv_cash_reopenings (
+    id uuid primary key, session_id uuid not null references pdv_cash_sessions(id),
+    closing_version integer not null, justification text not null, reopened_by text not null,
+    reopened_at timestamptz not null default now(), previous_summary jsonb not null
+  )`);
+  await pool.query(`create table if not exists pdv_admin_audit_logs (
+    id uuid primary key, actor_id text not null, actor_name text not null, actor_role text not null,
+    action text not null, entity_type text not null, entity_id text not null,
+    previous_value jsonb, new_value jsonb, ip_address text, terminal text,
+    created_at timestamptz not null default now()
+  )`);
+  await pool.query('create index if not exists pdv_admin_audit_created_idx on pdv_admin_audit_logs (created_at desc)');
+  await pool.query('create index if not exists pdv_admin_audit_entity_idx on pdv_admin_audit_logs (entity_type, entity_id, created_at desc)');
+  await pool.query('create index if not exists pdv_cash_closings_session_idx on pdv_cash_closing_versions (session_id, version desc)');
+  await pool.query(`create or replace function prevent_pdv_audit_mutation() returns trigger language plpgsql as $$
+    begin raise exception 'PDV audit history is append-only'; end;
+  $$`);
+  for (const table of ['pdv_admin_audit_logs','pdv_cash_closing_versions','pdv_cash_reopenings']) {
+    const trigger=`${table}_immutable`;
+    await pool.query(`drop trigger if exists ${trigger} on ${table}`);
+    await pool.query(`create trigger ${trigger} before update or delete on ${table} for each row execute function prevent_pdv_audit_mutation()`);
+  }
+  await pool.query(`insert into pdv_cash_closing_versions (id, session_id, version, closing_summary, closed_at, closed_by)
+    select gen_random_uuid(), id, 1, closing_summary, coalesce(closed_at, opened_at), operator_id
+    from pdv_cash_sessions where status='CLOSED' and closing_summary is not null
+    on conflict (session_id, version) do nothing`);
   await pool.query(`create table if not exists bling_webhook_events (
     event_id text primary key,
     event_name text not null,
@@ -91,3 +122,4 @@ export const initializeDatabase = async () => {
     where status in ('PENDING','PROCESSING','FAILED','DEAD')`);
   await pool.query('delete from oauth_states where expires_at < now()');
 };
+

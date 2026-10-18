@@ -38,6 +38,7 @@ app.addHook('preHandler', async (req, reply) => {
   const path = req.url.split('?')[0];
   const protectedRoute = path.startsWith('/sales') || path.startsWith('/customers') ||
     path.startsWith('/cash') || path.startsWith('/operations') ||
+    (path.startsWith('/admin') && path !== '/admin/login') ||
     (path === '/catalog/products/sync');
   if (!protectedRoute) return;
   if (!authConfigured()) {
@@ -55,6 +56,24 @@ const requireManager = (req: Parameters<typeof principalFromRequest>[0]) => {
   if (authConfigured() && principal?.role !== 'MANAGER') {
     throw Object.assign(new Error('Esta operação exige perfil de gerente'), { statusCode: 403 });
   }
+  return principal;
+};
+const requireAdmin = (req: Parameters<typeof principalFromRequest>[0]) => {
+  const principal = principalFromRequest(req);
+  if (!authConfigured()) throw Object.assign(new Error('Autenticação administrativa não configurada'), { statusCode: 503 });
+  if (principal?.role !== 'ADMIN') throw Object.assign(new Error('Esta operação exige perfil de administrador'), { statusCode: 403 });
+  return principal;
+};
+const requireAdminOrManager = (req: Parameters<typeof principalFromRequest>[0]) => {
+  const principal = principalFromRequest(req);
+  if (!authConfigured()) throw Object.assign(new Error('Autenticação gerencial não configurada'), { statusCode: 503 });
+  if (principal?.role !== 'ADMIN' && principal?.role !== 'MANAGER') throw Object.assign(new Error('Esta operação exige perfil gerencial'), { statusCode: 403 });
+  return principal;
+};
+const requireAdminViewer = (req: Parameters<typeof principalFromRequest>[0]) => {
+  if (!authConfigured()) throw Object.assign(new Error('Autenticação gerencial não configurada'), { statusCode: 503 });
+  const principal=principalFromRequest(req);
+  if (!principal) throw Object.assign(new Error('Sessão administrativa inválida'), { statusCode: 401 });
   return principal;
 };
 const sales = new Map<string, Sale>();
@@ -162,6 +181,27 @@ app.post('/auth/login', async (req, reply) => {
   }
   loginAttempts.delete(address);
   const principal = { operatorId: seller.id, operatorName: seller.name, role };
+  return { token: issueToken(principal), principal };
+});
+app.post('/admin/login', async (req, reply) => {
+  if (!authConfigured()) return reply.code(503).send({ message: 'Autenticação do PDV ainda não configurada no servidor.' });
+  const address = req.ip;
+  const current = loginAttempts.get(address);
+  if (current && current.resetAt > Date.now() && current.count >= 5) return reply.code(429).send({ message: 'Muitas tentativas. Aguarde cinco minutos' });
+  const body = req.body as { pin?: string; operatorId?: string };
+  const role=authenticatePin(String(body.pin ?? ''));
+  if (!role) {
+    const resetAt = current?.resetAt && current.resetAt > Date.now() ? current.resetAt : Date.now() + 5 * 60_000;
+    loginAttempts.set(address, { count: (current?.resetAt && current.resetAt > Date.now() ? current.count : 0) + 1, resetAt });
+    return reply.code(401).send({ message: 'PIN administrativo inválido' });
+  }
+  if(role!=='ADMIN'&&!body.operatorId)return reply.code(400).send({message:'Selecione seu usuário para registrar as consultas.'});
+  const seller=role==='ADMIN'?undefined:(await bling.sellers()).find(item=>item.id===body.operatorId&&item.active);
+  if(role!=='ADMIN'&&!seller)return reply.code(401).send({message:'Usuário operacional inválido.'});
+  loginAttempts.delete(address);
+  const principal = role==='ADMIN'
+    ? { operatorId: 'admin', operatorName: process.env.PDV_ADMIN_NAME || 'Administrador', role: 'ADMIN' as const }
+    : { operatorId: seller!.id, operatorName: seller!.name, role };
   return { token: issueToken(principal), principal };
 });
 
@@ -281,6 +321,238 @@ const cashSessionSnapshot = async (sessionId: string) => {
     pendingSales: pendingResult.rows[0]?.count ?? 0
   };
 };
+
+const writeAdminAudit = async (req: any, action: string, entityType: string, entityId: string, previousValue?: unknown, newValue?: unknown) => {
+  const database = requireDatabase();
+  const principal = principalFromRequest(req);
+  await database.query(`insert into pdv_admin_audit_logs
+    (id,actor_id,actor_name,actor_role,action,entity_type,entity_id,previous_value,new_value,ip_address,terminal)
+    values ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11)`, [
+    randomUUID(), principal?.operatorId ?? 'legacy-session', principal?.operatorName ?? 'Operador do PDV', principal?.role ?? 'OPERATOR',
+    action, entityType, entityId, previousValue === undefined ? null : JSON.stringify(previousValue),
+    newValue === undefined ? null : JSON.stringify(newValue), req.ip ?? null,
+    String(req.headers?.['x-pdv-terminal'] ?? req.headers?.['user-agent'] ?? '').slice(0, 300) || null
+  ]);
+};
+
+const adminSaleFilters = (req: any, query: Record<string, string | undefined>, values: unknown[], where: string[], alias = 'data') => {
+  const add = (value: unknown) => { values.push(value); return `$${values.length}`; };
+  if (query.from) where.push(`(${alias}->>'createdAt')::timestamptz >= ${add(`${query.from}T00:00:00-03:00`)}::timestamptz`);
+  if (query.to) where.push(`(${alias}->>'createdAt')::timestamptz < (${add(`${query.to}T00:00:00-03:00`)}::timestamptz + interval '1 day')`);
+  if (query.number?.trim()) where.push(`coalesce(${alias}->>'blingOrderNumber','') ilike ${add(`%${query.number.trim()}%`)}`);
+  if (query.customer?.trim()) where.push(`(coalesce(${alias}#>>'{customer,name}','') ilike ${add(`%${query.customer.trim()}%`)} or coalesce(${alias}#>>'{customer,cpf}','') ilike ${add(`%${query.customer.trim()}%`)})`);
+  if (query.operator?.trim()) where.push(`coalesce(${alias}->>'operatorId','') ilike ${add(`%${query.operator.trim()}%`)}`);
+  if (query.paymentMethod?.trim()) where.push(`exists(select 1 from jsonb_array_elements(coalesce(${alias}->'payments','[]'::jsonb)) p where coalesce(p->>'paymentMethodName',p->>'paymentMethodId','') ilike ${add(`%${query.paymentMethod.trim()}%`)})`);
+  if (query.status && query.status !== 'ALL') where.push(`${alias}->>'status'=${add(query.status)}`);
+  const principal = principalFromRequest(req);
+  if (principal?.role === 'OPERATOR') where.push(`${alias}->>'operatorId'=${add(principal.operatorId)}`);
+  return add;
+};
+
+// Área administrativa independente do terminal: consultas paginadas, relatórios,
+// reconciliação financeira e operações de caixa com trilha de auditoria.
+app.get('/admin/dashboard', async (req) => {
+  const principal = requireAdminViewer(req);
+  const database = requireDatabase();
+  const query = req.query as { from?: string; to?: string };
+  const today = todayInSaoPaulo();
+  const monthStart = `${today.slice(0, 7)}-01`;
+  const from = query.from || monthStart;
+  const to = query.to || today;
+  const values: unknown[] = [`${from}T00:00:00-03:00`, `${to}T00:00:00-03:00`];
+  const ownFilter = principal?.role === 'OPERATOR' ? ` and data->>'operatorId'=$3` : '';
+  if (ownFilter) values.push(principal!.operatorId);
+  const result = await database.query(`select data from pdv_sales where status in ('COMPLETED','RECONCILIATION_REQUIRED')
+    and (data->>'createdAt')::timestamptz >= $1::timestamptz and (data->>'createdAt')::timestamptz < ($2::timestamptz + interval '1 day')${ownFilter}
+    order by (data->>'createdAt')::timestamptz`, values) as { rows: { data: Sale }[] };
+  const salesInRange = result.rows.map(row => row.data);
+  const daySales = salesInRange.filter(sale => sale.createdAt.slice(0, 10) === today);
+  const monthSales = salesInRange.filter(sale => sale.createdAt.slice(0, 7) === today.slice(0, 7));
+  const group = (map: Map<string, number>, key: string, amount: number) => map.set(key, money((map.get(key) ?? 0) + amount));
+  const salesByDay = new Map<string, number>(), methods = new Map<string, number>(), products = new Map<string, number>(), operators = new Map<string, { count: number; total: number }>();
+  const clients = new Set<string>();
+  for (const sale of salesInRange) {
+    group(salesByDay, sale.createdAt.slice(0, 10), sale.total);
+    clients.add(sale.customer?.cpf || sale.customer?.name || 'Consumidor Final');
+    const operator = operators.get(sale.operatorId) ?? { count: 0, total: 0 };
+    operator.count++; operator.total = money(operator.total + sale.total); operators.set(sale.operatorId, operator);
+    for (const payment of sale.payments ?? []) group(methods, payment.paymentMethodName || payment.paymentMethodId, payment.amount);
+    for (const item of sale.items) group(products, item.name, item.quantity);
+  }
+  const lastCash = await database.query(`select max(opened_at) as "lastOpen",max(closed_at) as "lastClose" from pdv_cash_sessions ${principal?.role==='OPERATOR'?'where operator_id=$1':''}`,
+    principal?.role==='OPERATOR'?[principal.operatorId]:[]) as { rows: any[] };
+  const openSessions = await database.query(`select id from pdv_cash_sessions where status='OPEN'${principal?.role === 'OPERATOR' ? ' and operator_id=$1' : ''}`,
+    principal?.role === 'OPERATOR' ? [principal.operatorId] : []) as { rows: { id: string }[] };
+  let currentCashBalance = 0;
+  for (const session of openSessions.rows) currentCashBalance = money(currentCashBalance + (await cashSessionSnapshot(session.id)).expectedCash);
+  let sellerNames: Record<string,string> = {};
+  try { sellerNames = Object.fromEntries((await bling.sellers()).map(seller => [seller.id, seller.name])); } catch { /* relatórios seguem disponíveis sem o Bling */ }
+  return {
+    period: { from, to },
+    kpis: { salesToday: money(daySales.reduce((n, sale) => n + sale.total, 0)), salesMonth: money(monthSales.reduce((n, sale) => n + sale.total, 0)),
+      orders: salesInRange.length, averageTicket: salesInRange.length ? money(salesInRange.reduce((n, sale) => n + sale.total, 0) / salesInRange.length) : 0,
+      customers: clients.size, currentCashBalance, activeCashSessions: openSessions.rows.length },
+    charts: { salesByDay: [...salesByDay].map(([date,total]) => ({date,total})), payments: [...methods].map(([name,total]) => ({name,total})),
+      products: [...products].map(([name,quantity]) => ({name,quantity})).sort((a,b)=>b.quantity-a.quantity).slice(0,10),
+      operators: [...operators].map(([id,value]) => ({id,name:sellerNames[id]??id,...value})).sort((a,b)=>b.total-a.total).slice(0,10) },
+    lastCashOpen: lastCash.rows[0]?.lastOpen,
+    lastCashClose: lastCash.rows[0]?.lastClose
+  };
+});
+
+app.get('/admin/sales', async (req) => {
+  requireAdminViewer(req);
+  const database = requireDatabase();
+  const query = req.query as Record<string,string|undefined>;
+  const values: unknown[] = [];
+  const filters: string[] = [`status in ('COMPLETED','RECONCILIATION_REQUIRED','SYNC_FAILED','PROCESSING','CANCELLED','DELETED','OPEN')`];
+  const add = adminSaleFilters(req, query, values, filters);
+  const page = Math.max(1, Number(query.page)||1), pageSize = Math.max(10, Math.min(100, Number(query.pageSize)||25));
+  const orderBy: Record<string,string> = { date:`(data->>'createdAt')::timestamptz`, number:`coalesce(data->>'blingOrderNumber','')`, customer:`coalesce(data#>>'{customer,name}','')`, total:`(data->>'total')::numeric`, status:`data->>'status'` };
+  const sort = orderBy[query.sort||'date'] || orderBy.date, direction = query.direction === 'asc' ? 'asc' : 'desc';
+  const where = `where ${filters.join(' and ')}`;
+  const summary = await database.query(`select count(*)::int count,coalesce(sum((data->>'total')::numeric),0)::float8 total,coalesce(sum((data->>'discount')::numeric),0)::float8 discount from pdv_sales ${where}`,values) as { rows:any[] };
+  values.push(pageSize, (page-1)*pageSize);
+  const rows = await database.query(`select data from pdv_sales ${where} order by ${sort} ${direction} nulls last limit $${values.length-1} offset $${values.length}`,values) as { rows:{data:Sale}[] };
+  return { orders: rows.rows.map(row=>row.data), page, pageSize, totalRows: summary.rows[0]?.count??0, summary: summary.rows[0] };
+});
+
+app.get('/admin/sales/:id', async (req) => {
+  const principal = requireAdminViewer(req);
+  const sale = await getSale((req.params as {id:string}).id);
+  if (!sale) return badRequest('Pedido não encontrado');
+  if (principal?.role==='OPERATOR'&&sale.operatorId!==principal.operatorId) throw Object.assign(new Error('Sem permissão para consultar este pedido'),{statusCode:403});
+  return sale;
+});
+
+app.post('/admin/sales/:id/cancel', async (req) => {
+  requireAdmin(req);
+  const id = (req.params as {id:string}).id, sale = await getSale(id);
+  if (!sale) return badRequest('Pedido não encontrado');
+  if (sale.status==='CANCELLED') return sale;
+  if (sale.status==='DELETED') return badRequest('Pedido excluído não pode ser cancelado');
+  if (!sale.blingOrderId) return badRequest('Pedido sem vínculo com o Bling');
+  const before = { status:sale.status, total:sale.total, payments:sale.payments };
+  const result = sale.status==='OPEN' ? await bling.cancelDraftOrder(sale.blingOrderId) : await bling.cancelOrder(sale.blingOrderId);
+  let loyaltyWarning: string|undefined;
+  if (sale.fidelizeiTransactionId) try { await fidelizei.reverseSale(sale.id); } catch (error) { loyaltyWarning=error instanceof Error?error.message.slice(0,400):'Estorno Fidelizei pendente'; }
+  if (pool&&['COMPLETED','RECONCILIATION_REQUIRED'].includes(sale.status)) await pool.query(`update bling_products product set stock=product.stock+item.quantity from jsonb_to_recordset($1::jsonb) as item("productId" text,quantity numeric) where product.id=item."productId"`,[JSON.stringify(sale.items.map(item=>({productId:item.productId,quantity:item.quantity})))]);
+  sale.status='CANCELLED'; sale.cancelledAt=new Date().toISOString(); Object.assign(sale,{cancellationKind:'CANCELLED',lastError:loyaltyWarning});
+  await persist(sale); await writeAdminAudit(req,'CANCEL','sale',sale.id,before,{status:sale.status,total:sale.total,operatorId:sale.operatorId});
+  return {...sale,cancelledInBling:true,loyaltyWarning,blingWarnings:result.warnings};
+});
+
+app.get('/admin/finance', async (req) => {
+  const principal=requireAdminViewer(req), database=requireDatabase();
+  const query=req.query as {from?:string;to?:string}; const today=todayInSaoPaulo();
+  const from=query.from||`${today.slice(0,7)}-01`,to=query.to||today;
+  const values:unknown[]=[`${from}T00:00:00-03:00`,`${to}T00:00:00-03:00`];
+  const own=principal?.role==='OPERATOR'?' and s.data->>\'operatorId\'=$3':''; if(own)values.push(principal!.operatorId);
+  const result=await database.query(`select coalesce(p->>'paymentMethodName',p->>'paymentMethodId','Outros') name,count(*)::int transactions,coalesce(sum((p->>'amount')::numeric),0)::float8 total from pdv_sales s cross join lateral jsonb_array_elements(coalesce(s.data->'payments','[]'::jsonb)) p where s.status in ('COMPLETED','RECONCILIATION_REQUIRED') and (s.data->>'createdAt')::timestamptz >= $1::timestamptz and (s.data->>'createdAt')::timestamptz < ($2::timestamptz+interval '1 day')${own} group by 1 order by total desc`,values) as {rows:any[]};
+  const total=result.rows.reduce((sum,row)=>sum+Number(row.total),0);
+  return {period:{from,to},total:money(total),methods:result.rows.map(row=>({...row,total:money(Number(row.total)),average:row.transactions?money(Number(row.total)/row.transactions):0,share:total?Number((Number(row.total)/total*100).toFixed(2)):0}))};
+});
+
+app.get('/admin/cash/sessions', async (req) => {
+  const principal=requireAdminViewer(req),database=requireDatabase(); const query=req.query as Record<string,string|undefined>;
+  const values:unknown[]=[],filters:string[]=[]; const add=(value:unknown)=>{values.push(value);return `$${values.length}`;};
+  if(query.from)filters.push(`(c.opened_at at time zone 'America/Sao_Paulo')::date>=${add(query.from)}::date`);
+  if(query.to)filters.push(`(c.opened_at at time zone 'America/Sao_Paulo')::date<=${add(query.to)}::date`);
+  if(query.status&&query.status!=='ALL')filters.push(`c.status=${add(query.status)}`);
+  if(query.search?.trim())filters.push(`c.operator_id ilike ${add(`%${query.search.trim()}%`)}`);
+  if(principal?.role==='OPERATOR')filters.push(`c.operator_id=${add(principal.operatorId)}`);
+  const page=Math.max(1,Number(query.page)||1),pageSize=Math.max(10,Math.min(100,Number(query.pageSize)||25));
+  const where=filters.length?`where ${filters.join(' and ')}`:'';
+  const count=await database.query(`select count(*)::int count from pdv_cash_sessions c ${where}`,values) as {rows:any[]};
+  values.push(pageSize,(page-1)*pageSize);
+  const result=await database.query(`select c.id,c.operator_id "operatorId",c.status,c.opening_amount::float8 "openingAmount",c.opened_at "openedAt",c.closed_at "closedAt",c.closing_summary "closingSummary",coalesce(v.version,0)::int "closingVersion",coalesce(s.count,0)::int "salesCount",coalesce(s.total,0)::float8 "salesTotal" from pdv_cash_sessions c left join lateral(select max(version) version from pdv_cash_closing_versions where session_id=c.id) v on true left join lateral(select count(*) count,coalesce(sum((data->>'total')::numeric),0) total from pdv_sales where data->>'cashSessionId'=c.id::text and status in ('COMPLETED','RECONCILIATION_REQUIRED')) s on true ${where} order by c.opened_at desc limit $${values.length-1} offset $${values.length}`,values) as {rows:any[]};
+  return {sessions:result.rows,page,pageSize,totalRows:count.rows[0]?.count??0};
+});
+
+app.get('/admin/cash/sessions/:id', async (req) => {
+  const principal=requireAdminViewer(req),id=(req.params as {id:string}).id,snapshot=await cashSessionSnapshot(id);
+  if(principal?.role==='OPERATOR'&&snapshot.session.operatorId!==principal.operatorId)throw Object.assign(new Error('Sem permissão para consultar este caixa'),{statusCode:403});
+  const database=requireDatabase();
+  const versions=await database.query(`select version,closing_summary "closingSummary",closed_at "closedAt",closed_by "closedBy" from pdv_cash_closing_versions where session_id=$1 order by version`,[id]) as {rows:any[]};
+  const reopenings=await database.query(`select id,closing_version "closingVersion",justification,reopened_by "reopenedBy",reopened_at "reopenedAt" from pdv_cash_reopenings where session_id=$1 order by reopened_at`,[id]) as {rows:any[]};
+  const sales=snapshot.salesRows.map((row:any)=>row.data);
+  return {...snapshot,sales,versions:versions.rows,reopenings:reopenings.rows};
+});
+
+app.post('/admin/cash/sessions/open', async (req) => {
+  const principal=requireAdmin(req),body=req.body as {operatorId?:string;accountId?:string;channelId?:string;businessUnitId?:string;openingAmount?:number};
+  if(!body.operatorId||!body.accountId||!body.channelId)return badRequest('Informe operador, conta e loja');
+  if(await currentCashSession(body.operatorId))return conflict('Este operador já possui um caixa aberto');
+  const [accounts,channels,sellers]=await Promise.all([bling.financialAccounts(),bling.salesChannels(),bling.sellers()]);
+  const account=accounts.find(item=>item.id===body.accountId&&item.active),channel=channels.find(item=>item.id===body.channelId&&item.active),seller=sellers.find(item=>item.id===body.operatorId&&item.active);
+  if(!account||!channel||!seller)return badRequest('Operador, conta ou loja inválidos/inativos no Bling');
+  const businessUnitId=body.businessUnitId??channel.businessUnitId;
+  if(channel.id!=='DEFAULT'&&!businessUnitId)return badRequest('A loja não possui unidade de negócio vinculada');
+  const database=requireDatabase(),id=randomUUID(),amount=money(Math.max(0,Number(body.openingAmount)||0));
+  await database.query('begin');
+  try{await database.query(`insert into pdv_cash_sessions(id,operator_id,seller_id,account_id,account_name,channel_id,channel_name,business_unit_id,business_unit_name,status,opening_amount) values($1,$2,$2,$3,$4,$5,$6,$7,$8,'OPEN',$9)`,[id,seller.id,account.id,account.name,channel.id,channel.name,businessUnitId??null,channel.businessUnitName??null,amount]);
+    await database.query(`insert into pdv_cash_operations(id,session_id,operation_type,amount,data) values($1,$2,'OPENING',$3,$4::jsonb)`,[randomUUID(),id,amount,JSON.stringify({controlOnly:true,syncStatus:'NOT_REQUIRED',source:'ADMIN'})]);
+    await database.query('commit');}catch(error){await database.query('rollback');throw error;}
+  const session=await cashSessionById(id);await writeAdminAudit(req,'OPEN','cash_session',id,null,{session,openedBy:principal?.operatorName});return {session};
+});
+
+app.post('/admin/cash/sessions/:id/movements', async (req) => {
+  const principal=requireAdmin(req),id=(req.params as {id:string}).id,body=req.body as {type?:'WITHDRAWAL'|'SUPPLY';amount?:number;notes?:string};
+  if(!['WITHDRAWAL','SUPPLY'].includes(String(body.type)))return badRequest('Selecione sangria ou suprimento');
+  const notes=body.notes?.trim();if(!notes||notes.length<4)return badRequest('Informe uma justificativa para a movimentação');
+  const amount=money(Number(body.amount));if(!(amount>0))return badRequest('Informe um valor maior que zero');
+  const database=requireDatabase(),session=await cashSessionById(id);if(!session||session.status!=='OPEN')return conflict('A movimentação exige um caixa aberto');
+  const operationId=randomUUID();await database.query(`insert into pdv_cash_operations(id,session_id,operation_type,amount,data) values($1,$2,$3,$4,$5::jsonb)`,[operationId,id,body.type,amount,JSON.stringify({notes,source:'ADMIN',syncStatus:'PENDING'})]);
+  await writeAdminAudit(req,body.type==='WITHDRAWAL'?'SANGRIA':'SUPRIMENTO','cash_movement',operationId,null,{sessionId:id,amount,notes});
+  try{const entry=await bling.createCashEntry({type:body.type as 'WITHDRAWAL'|'SUPPLY',amount,accountId:session.accountId,notes:`${notes} · PDV ${operationId}`,date:todayInSaoPaulo()});await database.query(`update pdv_cash_operations set bling_entry_id=$2,data=data||'{"syncStatus":"SYNCED"}'::jsonb where id=$1`,[operationId,entry.id??null]);return {id:operationId,blingEntryId:entry.id,registeredInBling:true};}
+  catch(error){const message=error instanceof Error?error.message:'Falha desconhecida';await database.query(`update pdv_cash_operations set data=data||$2::jsonb where id=$1`,[operationId,JSON.stringify({syncStatus:'FAILED',lastError:message.slice(0,500)})]);await writeAdminAudit(req,'MOVEMENT_SYNC_FAILED','cash_movement',operationId,{syncStatus:'PENDING'},{syncStatus:'FAILED',error:message.slice(0,500)});throw error;}
+});
+
+app.post('/admin/cash/sessions/:id/reopen', async (req) => {
+  const principal=requireAdmin(req),id=(req.params as {id:string}).id,body=req.body as {justification?:string};
+  const justification=body.justification?.trim();if(!justification||justification.length<8)return badRequest('Justificativa obrigatória (mínimo de 8 caracteres)');
+  const database=requireDatabase(),session=await cashSessionById(id);if(!session)return badRequest('Caixa não encontrado');if(session.status!=='CLOSED')return conflict('Somente caixa fechado pode ser reaberto');
+  if(await currentCashSession(session.operatorId))return conflict('O operador já possui outro caixa aberto');
+  const version=await database.query('select coalesce(max(version),1)::int version from pdv_cash_closing_versions where session_id=$1',[id]) as {rows:any[]};
+  const closingVersion=version.rows[0]?.version??1;
+  await database.query('begin');try{
+    await database.query(`insert into pdv_cash_reopenings(id,session_id,closing_version,justification,reopened_by,previous_summary) values($1,$2,$3,$4,$5,$6::jsonb)`,[randomUUID(),id,closingVersion,justification,principal?.operatorName??principal?.operatorId,JSON.stringify(session.closingSummary??{})]);
+    await database.query(`update pdv_cash_sessions set status='OPEN',closed_at=null,closing_summary=null where id=$1 and status='CLOSED'`,[id]);
+    await database.query(`insert into pdv_cash_operations(id,session_id,operation_type,amount,data) values($1,$2,'REOPENING',0,$3::jsonb)`,[randomUUID(),id,JSON.stringify({controlOnly:true,source:'ADMIN',justification,actor:principal?.operatorName})]);
+    await database.query('commit');
+  }catch(error){await database.query('rollback');throw error;}
+  const updated=await cashSessionById(id);await writeAdminAudit(req,'REOPEN','cash_session',id,{status:'CLOSED',closingSummary:session.closingSummary},{status:'OPEN',justification,closingVersion});return {session:updated,closingVersion};
+});
+
+app.post('/admin/cash/sessions/:id/close', async (req) => {
+  const principal=requireAdminOrManager(req),id=(req.params as {id:string}).id,body=req.body as {countedValues?:{name:string;amount:number}[];notes?:string};
+  const database=requireDatabase(),snapshot=await cashSessionSnapshot(id);if(snapshot.session.status!=='OPEN')return conflict('Caixa não está aberto');
+  if(principal?.role==='OPERATOR'&&snapshot.session.operatorId!==principal.operatorId)throw Object.assign(new Error('Sem permissão para fechar este caixa'),{statusCode:403});
+  const expected=new Map(snapshot.paymentTotals.map(item=>[item.name,item.amount]));const cashName=[...expected.keys()].find(name=>/dinheiro|cash/i.test(name))??'Dinheiro';expected.set(cashName,snapshot.expectedCash);
+  const countedValues=body.countedValues?.length?body.countedValues:[...expected].map(([name,amount])=>({name,amount}));
+  const counted=new Map(countedValues.map(item=>[item.name,money(Number(item.amount)||0)]));
+  const reconciliation=[...new Set([...expected.keys(),...counted.keys()])].map(name=>({name,expected:money(expected.get(name)??0),counted:money(counted.get(name)??0),difference:money((counted.get(name)??0)-(expected.get(name)??0))}));
+  const summary={closedAt:new Date().toISOString(),countedValues,reconciliation,totalDifference:money(reconciliation.reduce((sum,item)=>sum+item.difference,0)),expectedCash:snapshot.expectedCash,notes:body.notes?.trim()||undefined,closedBy:principal?.operatorName};
+  await database.query('begin');try{
+    const versionResult=await database.query('select coalesce(max(version),0)::int version from pdv_cash_closing_versions where session_id=$1',[id]) as {rows:any[]};const version=(versionResult.rows[0]?.version??0)+1;
+    const update=await database.query(`update pdv_cash_sessions set status='CLOSED',closed_at=now(),closing_summary=$2::jsonb where id=$1 and status='OPEN' returning closed_at`,[id,JSON.stringify(summary)]) as {rows:any[]};if(!update.rows[0])throw conflict('Caixa foi alterado por outro usuário');
+    await database.query(`insert into pdv_cash_closing_versions(id,session_id,version,closing_summary,closed_at,closed_by) values($1,$2,$3,$4::jsonb,$5,$6)`,[randomUUID(),id,version,JSON.stringify(summary),update.rows[0].closed_at,principal?.operatorName??principal?.operatorId]);
+    await database.query(`insert into pdv_cash_operations(id,session_id,operation_type,amount,data) values($1,$2,'CLOSING',0,$3::jsonb)`,[randomUUID(),id,JSON.stringify({controlOnly:true,source:'ADMIN',version,summary})]);await database.query('commit');
+    await writeAdminAudit(req,'CLOSE','cash_session',id,{status:'OPEN'},{status:'CLOSED',version,summary});return {closed:true,version,summary};
+  }catch(error){await database.query('rollback');throw error;}
+});
+
+app.get('/admin/audit', async (req) => {
+  const principal=requireAdminViewer(req),database=requireDatabase(),query=req.query as {from?:string;to?:string;action?:string;page?:string;pageSize?:string};
+  const values:unknown[]=[],filters:string[]=[];const add=(value:unknown)=>{values.push(value);return `$${values.length}`;};
+  if(query.from)filters.push(`created_at>=${add(`${query.from}T00:00:00-03:00`)}::timestamptz`);if(query.to)filters.push(`created_at<(${add(`${query.to}T00:00:00-03:00`)}::timestamptz+interval '1 day')`);if(query.action&&query.action!=='ALL')filters.push(`action=${add(query.action)}`);if(principal?.role==='OPERATOR')filters.push(`actor_id=${add(principal.operatorId)}`);
+  const page=Math.max(1,Number(query.page)||1),pageSize=Math.max(10,Math.min(100,Number(query.pageSize)||25)),where=filters.length?`where ${filters.join(' and ')}`:'';
+  const count=await database.query(`select count(*)::int count from pdv_admin_audit_logs ${where}`,values) as {rows:any[]};values.push(pageSize,(page-1)*pageSize);
+  const result=await database.query(`select id,actor_id "actorId",actor_name "actorName",actor_role "actorRole",action,entity_type "entityType",entity_id "entityId",previous_value "previousValue",new_value "newValue",ip_address "ipAddress",terminal,created_at "createdAt" from pdv_admin_audit_logs ${where} order by created_at desc limit $${values.length-1} offset $${values.length}`,values) as {rows:any[]};
+  return {events:result.rows,page,pageSize,totalRows:count.rows[0]?.count??0};
+});
+
+app.get('/admin/catalog', async () => { const [sellers,paymentMethods,configuration]=await Promise.all([bling.sellers(),bling.paymentMethods(),Promise.all([bling.financialAccounts(),bling.salesChannels()])]);return {sellers,paymentMethods,accounts:configuration[0],channels:configuration[1]}; });
 
 app.get('/cash/accounts', async () => bling.financialAccounts());
 app.get('/cash/configuration', async () => {
