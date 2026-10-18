@@ -75,3 +75,83 @@
 @media(max-width:1120px){.admin-shell .admin-sidebar{width:228px}.admin-shell .admin-main{width:calc(100% - 228px);margin-left:228px;padding:22px}.admin-shell .admin-brand img{width:62px}}
 @media(max-width:760px){.admin-shell{padding-bottom:0}.admin-shell .admin-sidebar{position:relative;inset:auto;width:100%;height:auto;padding:8px 12px 6px}.admin-shell .admin-brand{display:flex;min-height:57px;padding:4px 6px 9px;margin:0}.admin-shell .admin-brand img{width:53px;height:39px}.admin-shell .admin-brand b{font-size:13px}.admin-shell .admin-brand small{font-size:8px}.admin-shell .admin-sidebar nav{display:flex;gap:4px;overflow-x:auto;margin:5px 0 0;align-items:flex-start;padding:4px 0 8px}.admin-shell .nav-group{display:flex;flex:none;margin:0}.admin-shell .nav-group-title,.admin-shell .sidebar-bottom{display:none}.admin-shell .nav-item{display:flex;align-items:center}.admin-shell .nav-main{width:auto;min-height:37px;white-space:nowrap;padding:7px 9px;font-size:11px}.admin-shell .nav-icon{font-size:15px;width:15px}.admin-shell .nav-chevron{display:none}.admin-shell .nav-submenu{display:flex;align-items:center;gap:1px;margin:0 4px;padding:0 0 0 5px}.admin-shell .nav-submenu button{white-space:nowrap;width:auto;padding:7px 8px;font-size:10px}.admin-shell .admin-main{width:100%;margin:0;padding:18px 14px 32px}.admin-shell .admin-topbar{align-items:flex-start}.admin-shell .admin-topbar h1{font-size:21px}.admin-shell .global-filters{flex-wrap:wrap;padding:10px}.admin-shell .global-filters label{flex:1;min-width:135px}.admin-login{grid-template-columns:1fr;gap:25px;align-content:center;padding:25px 18px}.admin-login .login-brand{max-width:480px}.admin-login .login-logo{width:155px;min-height:75px;margin-bottom:12px}.admin-login .login-brand h1{font-size:28px;margin:8px 0}.admin-login .login-brand p{font-size:12px}.admin-login .login-highlights{margin-top:13px}.admin-login form{padding:25px;gap:14px}.admin-login .login-form-heading h2{font-size:22px}}
 
+/* Superfícies e controles de leitura gerencial */
+.admin-shell .admin-main{background:var(--bg)}
+.admin-shell .admin-topbar{gap:20px}
+.admin-shell .topbar-actions{gap:12px}
+.admin-shell .profile-chip{border-left:1px solid var(--line);padding-left:15px}
+.admin-shell .profile-chip b{font-size:12px}
+.admin-shell .profile-chip small{font-size:11px}
+.admin-shell .icon-btn:hover,.admin-shell .secondary:hover,.admin-shell .export-actions button:hover,.admin-shell .table-button:hover,.admin-shell .row-actions button:hover,.admin-shell .pagination button:not(:disabled):hover{border-color:#aebec5;background:var(--surface-2)}
+.admin-shell .primary{background:#247e4f;border-color:#247e4f;box-shadow:none}
+.admin-shell .primary:hover{background:#1c6b42}
+.admin-shell .period-shortcuts{display:flex;align-items:center;gap:5px;margin-right:auto;padding-right:14px;border-right:1px solid var(--line)}
+.admin-shell .period-shortcuts span{color:var(--muted);font-size:11px;font-weight:700;margin-right:5px}
+.admin-shell .period-shortcuts button{border:1px solid transparent;border-radius:7px;background:transparent;color:var(--muted);padding:8px 10px;min-height:36px;font-size:11px;font-weight:700}
+.admin-shell .period-shortcuts button:hover{background:var(--surface-2);color:var(--text)}
+.admin-shell .period-shortcuts button.active{background:#e7f2eb;border-color:#bcdcc8;color:#1d7344}
+.admin-shell.dark .period-shortcuts button.active{background:#274534;border-color:#366347;color:#b8e2c7}
+.admin-shell .global-filters label{white-space:nowrap}
+.admin-shell .global-filters .secondary{white-space:nowrap}
+.admin-shell .kpi-grid{gap:12px}
+.admin-shell .kpi-grid article{border-top:1px solid var(--line);position:relative}
+.admin-shell .kpi-grid article:before{content:'';position:absolute;top:16px;right:17px;width:7px;height:7px;border-radius:50%;background:#b9d7c4}
+.admin-shell .kpi-grid b{font-size:25px;line-height:1.15}
+.admin-shell .surface{border-color:var(--line)}
+.admin-shell .surface-heading{padding-bottom:10px;border-bottom:1px solid var(--line)}
+.admin-shell .surface-heading h2{letter-spacing:-.02em}
+.admin-shell .chart-card,.admin-shell .list-card{min-height:258px}
+.admin-shell .bar-chart{height:185px}
+.admin-shell .payment-bars{max-height:190px}
+.admin-shell .rank-row:last-child{border-bottom:0}
+.admin-shell .rank-number{background:var(--surface-2);color:var(--text);font-weight:800}
+.admin-shell .last-cash-strip{flex-wrap:wrap;gap:16px 28px}
+.admin-shell .last-cash-strip b{font-size:12px}
+.admin-shell .filter-grid label,.admin-shell .cash-filter label{font-size:11px;color:var(--text)}
+.admin-shell .filter-grid input::placeholder,.admin-shell .cash-filter input::placeholder{color:#98a4ad}
+.admin-shell .filter-grid button{align-self:stretch}
+.admin-shell .orders-summary{gap:10px}
+.admin-shell .orders-summary>div:not(.export-actions){min-width:168px;min-height:72px;padding:13px 16px}
+.admin-shell .orders-summary b{font-size:19px}
+.admin-shell .export-actions button{min-height:36px;padding:8px 12px}
+.admin-shell .table-surface .surface-heading{margin:0;padding:18px 19px 12px}
+.admin-shell table{font-variant-numeric:tabular-nums}
+.admin-shell th{font-size:10px;letter-spacing:.045em;background:var(--surface-2)}
+.admin-shell tbody tr:hover{background:color-mix(in srgb,var(--surface-2) 65%,transparent)}
+.admin-shell td{white-space:normal;min-width:88px;vertical-align:middle}
+.admin-shell td b{font-weight:750}
+.admin-shell .row-actions{white-space:nowrap}
+.admin-shell .row-actions button,.admin-shell .table-button{min-height:32px}
+.admin-shell .status-badge{display:inline-flex;align-items:center;white-space:nowrap;font-size:10px;padding:6px 9px}
+.admin-shell .status-badge.processing,.admin-shell .status-badge.reconciliation_required{background:#fff4da;color:#866014}
+.admin-shell .pagination{border-top:1px solid var(--line);min-height:57px}
+.admin-shell .pagination.surface{border-top:1px solid var(--line)}
+.admin-shell .finance-total{border-left:3px solid #247e4f}
+.admin-shell .finance-total b{font-size:31px}
+.admin-shell .cash-toolbar{padding:4px 0}
+.admin-shell .cash-filter{gap:11px}
+.admin-shell .audit-toolbar{display:flex;align-items:end;gap:14px;padding:14px 18px}
+.admin-shell .audit-toolbar>div{display:grid;gap:4px;margin-right:auto}
+.admin-shell .audit-toolbar b{font-size:13px}
+.admin-shell .audit-toolbar small{font-size:11px;color:var(--muted)}
+.admin-shell .audit-toolbar label{display:grid;gap:5px;font-size:11px;font-weight:700;color:var(--muted);min-width:190px}
+.admin-shell .audit-toolbar button{min-height:40px}
+.admin-shell .admin-modal{border:1px solid var(--line);border-radius:14px}
+.admin-shell .admin-modal h2{font-size:22px}
+.admin-shell .admin-modal>p{font-size:12px;line-height:1.6}
+.admin-shell .admin-modal label{font-size:12px;color:var(--text)}
+.admin-shell .detail-grid span{font-size:11px}
+.admin-shell .detail-grid b{font-size:12px}
+.admin-shell .detail-totals{display:grid;gap:8px;margin:17px 0;border-top:1px solid var(--line);padding-top:13px}
+.admin-shell .detail-totals span{display:flex;justify-content:space-between;gap:15px;font-size:12px}
+.admin-shell .detail-totals span:last-child{font-weight:800;font-size:17px}
+.admin-shell .reopen-context{display:grid;gap:8px;background:var(--surface-2);border:1px solid var(--line);padding:13px;border-radius:9px;margin-bottom:17px}
+.admin-shell .reopen-context span{display:flex;justify-content:space-between;gap:12px;font-size:12px;color:var(--muted)}
+.admin-shell .reopen-context b{color:var(--text)}
+.admin-shell .reopen-overlay{z-index:20}
+.admin-shell .busy-indicator{font-size:12px}
+.admin-shell .admin-modal pre{max-width:380px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px;color:var(--text)}
+.admin-shell .admin-modal-bg:has(.cash-modal) .admin-modal{width:min(760px,100%)}
+.admin-shell .cash-sales-overlay .admin-modal{width:min(760px,100%)}
+@media(max-width:1100px){.admin-shell .period-shortcuts{width:100%;border-right:0;border-bottom:1px solid var(--line);padding:0 0 8px;margin-bottom:2px}.admin-shell .global-filters{flex-wrap:wrap}}
+@media(max-width:760px){.admin-shell .topbar-actions{gap:5px}.admin-shell .profile-chip{padding-left:7px}.admin-shell .global-filters{gap:7px}.admin-shell .period-shortcuts{overflow-x:auto}.admin-shell .period-shortcuts button{white-space:nowrap}.admin-shell .orders-summary>div:not(.export-actions){min-width:135px}.admin-shell .audit-toolbar{flex-wrap:wrap}.admin-shell .audit-toolbar>div{width:100%}.admin-shell .audit-toolbar label{flex:1}.admin-shell .audit-toolbar button{align-self:end}.admin-shell .reopen-context span{display:grid;gap:3px}}
