@@ -6,3 +6,72 @@
 @media print{.admin-sidebar,.admin-topbar,.global-filters,.feedback,.export-actions,.row-actions,.pagination,.busy-indicator{display:none!important}.admin-main{margin:0;width:100%;padding:0}.admin-shell{background:white;color:#111}.surface,.kpi-grid article{box-shadow:none}}
 @media(max-width:760px){.movement-quick-toolbar{left:8px;right:8px;bottom:69px;justify-content:center;gap:5px;padding:8px}.movement-quick-toolbar b,.movement-quick-toolbar>span{display:none}.movement-quick-toolbar button{padding:8px;font-size:9px}.orders-sortbar{justify-content:flex-start;flex-wrap:wrap}}
 .role-manager .cash-toolbar>.primary,.role-manager .movement-quick-toolbar,.role-manager .danger-link{display:none!important}
+
+/* Identidade e navegação da área administrativa */
+.admin-shell{--bg:#f5f6f7;--surface:#fff;--surface-2:#f7f8fa;--text:#202934;--muted:#667382;--line:#dfe5eb;--green:#258750;--green-soft:#e6f4eb;--amber:#b38422;font-size:13px;line-height:1.45}
+.admin-shell.dark{--bg:#111a22;--surface:#1d2933;--surface-2:#25323d;--text:#eef2f4;--muted:#a6b3bd;--line:#394752}
+.admin-shell .admin-sidebar{width:260px;padding:21px 15px;background:#17242a;border-right:1px solid #263a40}
+.admin-shell .admin-main{width:calc(100% - 260px);margin-left:260px;padding:28px clamp(22px,3vw,48px) 50px;max-width:none}
+.admin-shell .admin-brand{height:auto;min-height:78px;padding:8px 10px 19px;margin-bottom:6px;border-bottom:1px solid #344149;gap:11px}
+.admin-shell .admin-brand img{width:73px;height:48px;object-fit:contain;flex:none}
+.admin-shell .admin-brand b{font-size:15px;line-height:1.1}
+.admin-shell .admin-brand small{font-size:9px;letter-spacing:.08em}
+.admin-shell .admin-sidebar nav{display:block;margin-top:13px;overflow-y:auto;min-height:0}
+.admin-shell .nav-group{margin:0 0 18px}
+.admin-shell .nav-group-title{padding:0 12px;margin:0 0 6px;color:#81919b;font-size:10px;font-weight:800;letter-spacing:.12em;text-transform:uppercase}
+.admin-shell .nav-main{width:100%;min-height:42px;display:flex;align-items:center;gap:12px;padding:9px 11px;border:0;border-radius:9px;background:transparent;color:#c2cdd2;text-align:left;font-size:13px;font-weight:650}
+.admin-shell .nav-main:hover{background:#26383e;color:#fff}
+.admin-shell .nav-main.selected{background:#31433e;color:#fff;box-shadow:inset 3px 0 #d8ae56}
+.admin-shell .nav-icon{width:22px;flex:none;color:#d3b579;font-size:19px;line-height:1;text-align:center}
+.admin-shell .nav-chevron{margin-left:auto;color:#91a19e;font-size:17px}
+.admin-shell .nav-submenu{display:grid;gap:1px;margin:3px 0 0 31px;padding:3px 0 3px 12px;border-left:1px solid #40504c}
+.admin-shell .nav-submenu button{width:100%;border:0;background:transparent;color:#aabbb8;text-align:left;border-radius:6px;padding:7px 10px;font-size:11px;font-weight:600}
+.admin-shell .nav-submenu button:hover,.admin-shell .nav-submenu button.active{background:#30443e;color:#f4d58b}
+.admin-shell .sidebar-bottom{font-size:12px}
+.admin-shell .admin-topbar{padding-bottom:18px;border-bottom:1px solid var(--line);margin-bottom:18px}
+.admin-shell .admin-topbar h1{font-size:25px}
+.admin-shell .admin-topbar>div:first-child>small{font-size:10px;color:var(--amber)}
+.admin-shell .global-filters{justify-content:flex-start;background:var(--surface);border:1px solid var(--line);border-radius:11px;padding:12px 15px;margin-bottom:18px}
+.admin-shell .global-filters label{font-size:12px}
+.admin-shell .global-filters input,.admin-shell input,.admin-shell select,.admin-shell textarea{border-radius:8px;min-height:40px}
+.admin-shell .primary,.admin-shell .secondary{min-height:40px}
+.admin-shell .kpi-grid article,.admin-shell .surface,.admin-shell .finance-total{border-radius:11px;box-shadow:0 3px 15px #12262d09}
+.admin-shell .kpi-grid article{min-height:118px;padding:19px 20px;border-top:3px solid #c8a05b}
+.admin-shell .kpi-grid span,.admin-shell .finance-total span{font-size:12px}
+.admin-shell .kpi-grid small,.admin-shell .surface-heading p,.admin-shell .cash-toolbar p{font-size:11px}
+.admin-shell .surface-heading h2,.admin-shell .cash-toolbar h2{font-size:16px}
+.admin-shell .rank-row,.admin-shell .payment-bars>div,.admin-shell .movement-row,.admin-shell .version-row{font-size:12px}
+.admin-shell .rank-row b small,.admin-shell .payment-bars small,.admin-shell .movement-row small,.admin-shell .version-row span{font-size:10px}
+.admin-shell th{font-size:10px;padding:13px 14px}
+.admin-shell td{font-size:12px;padding:13px 14px}
+.admin-shell td small,.admin-shell .filter-grid label,.admin-shell .cash-filter label,.admin-shell .admin-modal label{font-size:11px}
+.admin-shell .status-badge,.admin-shell .export-actions button,.admin-shell .table-button,.admin-shell .row-actions button,.admin-shell .pagination button{font-size:11px}
+.admin-shell .empty,.admin-shell .pagination,.admin-shell .cash-filter,.admin-shell .orders-summary span,.admin-shell .last-cash-strip{font-size:12px}
+.admin-shell .orders-summary b{font-size:17px}
+.admin-shell .table-scroll{scrollbar-color:#b8c4c9 transparent}
+.admin-shell button:focus-visible,.admin-shell input:focus-visible,.admin-shell select:focus-visible,.admin-login button:focus-visible,.admin-login input:focus-visible,.admin-login select:focus-visible{outline:3px solid #d8af62;outline-offset:2px}
+.admin-shell [class*=surface],.admin-shell .cash-toolbar{scroll-margin-top:18px}
+
+.admin-login{min-height:100vh;grid-template-columns:minmax(320px,480px) minmax(330px,440px);gap:clamp(38px,6vw,100px);padding:38px;background:radial-gradient(circle at 16% 22%,#31463e 0,#18282b 44%,#121c22 100%);font:14px 'DM Sans',Inter,system-ui,sans-serif}
+.admin-login .login-brand{position:relative;max-width:460px}
+.admin-login .login-logo{width:218px;min-height:116px;display:flex;align-items:center;margin-bottom:27px}
+.admin-login .login-logo img{width:100%;height:auto;object-fit:contain;filter:drop-shadow(0 5px 17px #0005)}
+.admin-login .login-brand>small{color:#e3bc72;font-size:11px;letter-spacing:.16em}
+.admin-login .login-brand h1{font:800 clamp(32px,3vw,43px) Manrope,Inter,sans-serif;letter-spacing:-.05em;max-width:420px;margin:16px 0}
+.admin-login .login-brand p{font-size:15px;color:#bdc9c8;line-height:1.65;max-width:380px}
+.admin-login .login-highlights{display:flex;flex-wrap:wrap;gap:8px;margin-top:29px}
+.admin-login .login-highlights span{border:1px solid #5d746b;background:#ffffff0d;border-radius:999px;padding:7px 12px;color:#d9e4dc;font-size:11px;font-weight:650}
+.admin-login form{padding:34px;border:1px solid #e6e9eb;border-radius:16px;gap:18px;box-shadow:0 28px 70px #07131670}
+.admin-login .login-form-heading{display:grid;gap:7px;margin-bottom:4px}
+.admin-login .login-form-heading span{color:#a47522;font-size:10px;font-weight:800;letter-spacing:.14em}
+.admin-login .login-form-heading h2{margin:0;color:#1d2931;font:800 25px Manrope,Inter,sans-serif;letter-spacing:-.04em;line-height:1.2}
+.admin-login .login-form-heading p{margin:0;color:#697780;font-size:12px;line-height:1.5}
+.admin-login form label{color:#36444d;font-size:12px;font-weight:700;gap:8px}
+.admin-login form input,.admin-login form select{min-height:46px;border:1px solid #d9e1e4;background:#fbfcfc;color:#1d2931;padding:11px 12px;border-radius:9px;font-size:13px}
+.admin-login form .primary{min-height:47px;margin-top:4px;border-radius:9px;font-size:13px;background:#1f7f4b}
+.admin-login .login-help{border-top:1px solid #e8ebed;padding-top:15px;color:#708087;font-size:11px;line-height:1.55}
+.admin-login .admin-error{font-size:12px;margin:0}
+
+@media(max-width:1120px){.admin-shell .admin-sidebar{width:228px}.admin-shell .admin-main{width:calc(100% - 228px);margin-left:228px;padding:22px}.admin-shell .admin-brand img{width:62px}}
+@media(max-width:760px){.admin-shell{padding-bottom:0}.admin-shell .admin-sidebar{position:relative;inset:auto;width:100%;height:auto;padding:8px 12px 6px}.admin-shell .admin-brand{display:flex;min-height:57px;padding:4px 6px 9px;margin:0}.admin-shell .admin-brand img{width:53px;height:39px}.admin-shell .admin-brand b{font-size:13px}.admin-shell .admin-brand small{font-size:8px}.admin-shell .admin-sidebar nav{display:flex;gap:4px;overflow-x:auto;margin:5px 0 0;align-items:flex-start;padding:4px 0 8px}.admin-shell .nav-group{display:flex;flex:none;margin:0}.admin-shell .nav-group-title,.admin-shell .sidebar-bottom{display:none}.admin-shell .nav-item{display:flex;align-items:center}.admin-shell .nav-main{width:auto;min-height:37px;white-space:nowrap;padding:7px 9px;font-size:11px}.admin-shell .nav-icon{font-size:15px;width:15px}.admin-shell .nav-chevron{display:none}.admin-shell .nav-submenu{display:flex;align-items:center;gap:1px;margin:0 4px;padding:0 0 0 5px}.admin-shell .nav-submenu button{white-space:nowrap;width:auto;padding:7px 8px;font-size:10px}.admin-shell .admin-main{width:100%;margin:0;padding:18px 14px 32px}.admin-shell .admin-topbar{align-items:flex-start}.admin-shell .admin-topbar h1{font-size:21px}.admin-shell .global-filters{flex-wrap:wrap;padding:10px}.admin-shell .global-filters label{flex:1;min-width:135px}.admin-login{grid-template-columns:1fr;gap:25px;align-content:center;padding:25px 18px}.admin-login .login-brand{max-width:480px}.admin-login .login-logo{width:155px;min-height:75px;margin-bottom:12px}.admin-login .login-brand h1{font-size:28px;margin:8px 0}.admin-login .login-brand p{font-size:12px}.admin-login .login-highlights{margin-top:13px}.admin-login form{padding:25px;gap:14px}.admin-login .login-form-heading h2{font-size:22px}}
+
