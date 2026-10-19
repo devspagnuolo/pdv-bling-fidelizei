@@ -157,3 +157,50 @@
 @media(max-width:1100px){.admin-shell .period-shortcuts{width:100%;border-right:0;border-bottom:1px solid var(--line);padding:0 0 8px;margin-bottom:2px}.admin-shell .global-filters{flex-wrap:wrap}}
 @media(max-width:760px){.admin-shell .topbar-actions{gap:5px}.admin-shell .profile-chip{padding-left:7px}.admin-shell .global-filters{gap:7px}.admin-shell .period-shortcuts{overflow-x:auto}.admin-shell .period-shortcuts button{white-space:nowrap}.admin-shell .orders-summary>div:not(.export-actions){min-width:135px}.admin-shell .audit-toolbar{flex-wrap:wrap}.admin-shell .audit-toolbar>div{width:100%}.admin-shell .audit-toolbar label{flex:1}.admin-shell .audit-toolbar button{align-self:end}.admin-shell .reopen-context span{display:grid;gap:3px}}
 
+/* Consistent enterprise reading density, limited to Admin. */
+@media screen {
+  .admin-shell{--bg:#f3f5f7;--line:#dde4e9;--muted:#637380;line-height:1.45}
+  .admin-shell.dark{--bg:#111820;--line:#34414c;--muted:#a0adba}
+  .admin-shell .admin-topbar h1{font-size:25px;letter-spacing:-.03em}
+  .admin-shell .admin-sidebar nav{scrollbar-width:thin;scrollbar-color:#52646d transparent}
+  .admin-shell .nav-main{gap:9px}
+  .admin-shell .nav-main>span:nth-child(2){line-height:1.4}
+  .admin-shell .nav-submenu button{min-height:34px;font-size:12px}
+  .admin-shell .surface,.admin-shell .kpi-grid article{box-shadow:0 2px 6px #17242a04;border-radius:10px}
+  .admin-shell .kpi-grid article{padding:18px 20px;gap:8px}
+  .admin-shell .kpi-grid small{font-size:11px;color:var(--muted)}
+  .admin-shell .surface-heading p,.admin-shell .cash-toolbar p{font-size:12px;line-height:1.5}
+  .admin-shell .rank-row{font-size:12px;padding:12px 0}
+  .admin-shell .rank-row strong,.admin-shell .rank-row b small{font-size:11px}
+  .admin-shell .payment-bars>div,.admin-shell .payment-bars b{font-size:12px}
+  .admin-shell .empty{font-size:13px;padding:36px 20px;line-height:1.6}
+  .admin-shell th{padding:13px 14px;font-size:10px}
+  .admin-shell td{padding:14px;font-size:12px;line-height:1.5}
+  .admin-shell .pagination,.admin-shell .pagination button{font-size:12px}
+  .admin-shell .row-actions button,.admin-shell .table-button,.admin-shell .export-actions button{font-size:11px}
+  .admin-shell .row-actions{display:table-cell}
+  .admin-shell .row-actions button{margin:2px 4px 2px 0}
+  .admin-shell .filter-grid{grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+  .admin-shell .filter-grid button{grid-column:auto;grid-row:auto;min-height:40px;align-self:end}
+  .admin-shell :is(input,select,textarea){min-height:40px;font-size:13px}
+  .admin-shell :is(button,a,input,select,textarea):focus-visible{outline:2px solid #b38a38;outline-offset:3px}
+  .admin-shell .admin-modal .movement-row,.admin-shell .admin-modal .version-row{padding:12px 2px;font-size:12px}
+  .admin-shell .movement-row small,.admin-shell .version-row span{font-size:11px}
+  .admin-shell .admin-page pre{max-width:460px;max-height:280px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;padding:12px;background:var(--surface-2);border-radius:8px;font-size:11px}
+  .admin-shell .feedback{font-size:13px;line-height:1.5}
+  .admin-login .login-brand{background:transparent;border:0;box-shadow:none;border-radius:0}
+  .admin-login .login-form-heading p,.admin-login .login-help{font-size:13px}
+}
+@media screen and (max-width:760px){
+  .admin-shell .filter-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .admin-shell .admin-topbar{flex-wrap:wrap;gap:12px}
+  .admin-shell .topbar-actions{margin-left:auto}
+  .admin-shell .nav-main>span:nth-child(2){font-size:12px}
+  .admin-shell .kpi-grid b{font-size:22px}
+  .admin-shell .kpi-grid article{padding:14px}
+}
+@media screen and (max-width:420px){
+  .admin-shell .filter-grid{grid-template-columns:1fr}
+  .admin-shell .global-filters label{min-width:0}
+  .admin-shell .pagination>div{flex-wrap:wrap}
+}
