@@ -196,7 +196,8 @@ const findBlingCustomer = async (cpf: string): Promise<BlingCustomer | undefined
   }
   const id = textValue(raw.id);
   const name = textValue(raw.nome ?? raw.fantasia);
-  if (!id || !name) return undefined;
+  const detailDocument = textValue(raw.numeroDocumento ?? raw.cnpj ?? raw.cpf)?.replace(/\D/g, '');
+  if (!id || !name || (detailDocument && detailDocument !== document)) return undefined;
   return { id, cpf: document, name, email: textValue(raw.email), phone: textValue(raw.celular ?? raw.telefone) };
 };
 type BlingCustomerAddress = { postalCode: string; street: string; number: string; complement?: string; neighborhood: string; city: string; state: string };
@@ -212,7 +213,17 @@ const createBlingCustomer = async (input: { name: string; cpf: string; phone?: s
     indicadorIe: 9,
     celular: input.phone?.replace(/\D/g, '') || undefined,
     email: input.email?.trim() || undefined,
-    endereco: { geral: { endereco: input.address.street, cep: input.address.postalCode, bairro: input.address.neighborhood, municipio: input.address.city, uf: input.address.state, numero: input.address.number, complemento: input.address.complement || undefined } }
+    endereco: {
+      geral: {
+        endereco: input.address.street,
+        cep: input.address.postalCode,
+        bairro: input.address.neighborhood,
+        municipio: input.address.city,
+        uf: input.address.state,
+        numero: input.address.number,
+        complemento: input.address.complement || undefined
+      }
+    }
   };
   const response = await blingRequest('/contatos', { method: 'POST', body: JSON.stringify(payload) });
   const body = await response.json().catch(() => ({})) as { data?: { id?: string | number }; message?: string; error?: unknown };
@@ -226,17 +237,36 @@ const createBlingCustomer = async (input: { name: string; cpf: string; phone?: s
     }
     throw Object.assign(new Error(`Bling não cadastrou o cliente (HTTP ${response.status})${detail ? `: ${detail.slice(0, 700)}` : ''}`), { statusCode: response.status });
   }
-  return { id: String(body.data.id), cpf, name: payload.nome, phone: input.phone, email: input.email, idempotent: false };
+  const createdId = String(body.data.id);
+  let createdDocument: string | undefined;
+  for (let attempt = 0; attempt < 3 && createdDocument !== cpf; attempt += 1) {
+    if (attempt) await delay(350 * attempt);
+    const createdResponse = await blingRequest(`/contatos/${encodeURIComponent(createdId)}`);
+    if (!createdResponse.ok) continue;
+    const createdBody = await createdResponse.json().catch(() => ({})) as { data?: Record<string, unknown> };
+    createdDocument = textValue(createdBody.data?.numeroDocumento ?? createdBody.data?.cnpj ?? createdBody.data?.cpf)?.replace(/\D/g, '');
+  }
+  if (createdDocument !== cpf) throw new Error(`Bling cadastrou o contato ${createdId}, mas não confirmou o CPF solicitado; nenhuma venda deve ser vinculada a este contato`);
+  console.info(JSON.stringify({ event: 'bling.customer.created', contactId: createdId }));
+  return { id: createdId, cpf, name: payload.nome, phone: input.phone, email: input.email, idempotent: false };
 };
-let finalConsumerCache: { expires: number; id: string } | undefined;
 const findFinalConsumerId = async () => {
-  if (finalConsumerCache && finalConsumerCache.expires > Date.now()) return finalConsumerCache.id;
-  const response = await blingRequest('/contatos?pagina=1&limite=100&pesquisa=Consumidor%20Final');
+  const response = await blingRequest('/contatos?pagina=1&limite=100&criterio=1&pesquisa=Consumidor%20Final');
   if (!response.ok) throw new Error(`Bling não retornou o Consumidor Final (HTTP ${response.status})`);
-  const row = records(await response.json()).find(item => /consumidor final/i.test(textValue(item.nome ?? item.fantasia) ?? ''));
+  const row = records(await response.json()).find(item =>
+    (textValue(item.nome) ?? '').trim().toLocaleLowerCase('pt-BR') === 'consumidor final' &&
+    !textValue(item.numeroDocumento ?? item.cnpj ?? item.cpf)?.replace(/\D/g, '')
+  );
   const id = row ? textValue(row.id) : undefined;
-  if (!id) throw new Error('Cadastre ou ative o contato Consumidor Final no Bling');
-  finalConsumerCache = { expires: Date.now() + 10 * 60_000, id };
+  if (!id) throw new Error('Contato Consumidor Final sem CPF não encontrado no Bling; confira o cadastro antes de criar uma venda sem cliente');
+  const detailResponse = await blingRequest(`/contatos/${encodeURIComponent(id)}`);
+  if (!detailResponse.ok) throw new Error(`Não foi possível confirmar o contato Consumidor Final no Bling (HTTP ${detailResponse.status})`);
+  const detailBody = await detailResponse.json().catch(() => ({})) as { data?: Record<string, unknown> };
+  const detail = detailBody.data;
+  if (!detail || (textValue(detail.nome) ?? '').trim().toLocaleLowerCase('pt-BR') !== 'consumidor final' ||
+      textValue(detail.numeroDocumento ?? detail.cnpj ?? detail.cpf)?.replace(/\D/g, '')) {
+    throw new Error('O contato Consumidor Final do Bling foi alterado; venda sem cliente bloqueada para evitar associação incorreta');
+  }
   return id;
 };
 type SalesOrderInput = { customerId?: string; sellerId: string; salesChannelId?: string; businessUnitId?: string; categoryId?: string; items: SaleItem[]; discount: number; freight: number; observations?: string; payments: PaymentSplit[]; idempotencyKey: string; statusId?: string; clearDiscount?: boolean };
@@ -317,6 +347,7 @@ const createOrder = async (input: SalesOrderInput) => {
   }
   const id = String(body.data.id);
   const number = await readOrderNumber(id);
+  console.info(JSON.stringify({ event: 'bling.order.created', orderId: id, orderNumber: number, contactId: payload.contato.id, saleId: input.idempotencyKey }));
   return { id, number, status: 'CONFIRMED' as const };
 };
 const updateOrder = async (orderId: string, input: SalesOrderInput) => {
@@ -335,6 +366,7 @@ const updateOrder = async (orderId: string, input: SalesOrderInput) => {
       (!Number.isFinite(actualTotal) || Math.abs(actualTotal - expectedTotal) <= 0.009);
   });
   verifyOrderDiscount(details, input);
+  console.info(JSON.stringify({ event: 'bling.order.updated', orderId, orderNumber: textValue(details?.numero), contactId: payload.contato.id, saleId: input.idempotencyKey }));
   return { id: orderId, number: textValue(details?.numero), status: 'CONFIRMED' as const };
 };
 
