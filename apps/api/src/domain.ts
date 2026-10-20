@@ -69,6 +69,8 @@ export type Sale = {
   blingOrderId?: string;
   blingOrderNumber?: string;
   blingDraftStatusId?: string;
+  // Contato exclusivo desta venda sem CPF no Bling. Nunca é compartilhado com outro pedido.
+  blingAnonymousContactId?: string;
   blingFulfillment?: { stockPosted: boolean; accountsPosted: boolean; attended: boolean; statusId?: string };
   cancelledAt?: string;
   fiscalDocumentUrl?: string;

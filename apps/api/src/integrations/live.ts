@@ -250,36 +250,25 @@ const createBlingCustomer = async (input: { name: string; cpf: string; phone?: s
   console.info(JSON.stringify({ event: 'bling.customer.created', contactId: createdId }));
   return { id: createdId, cpf, name: payload.nome, phone: input.phone, email: input.email, idempotent: false };
 };
-// Todas as vendas sem identificação compartilham este único contato no Bling. Se alguém
-// editar o Consumidor Final (por exemplo, para "cadastrar" um cliente novo), todos os
-// pedidos vinculados a ele passam a exibir esses dados. Por isso o ID pode ser fixado em
-// BLING_FINAL_CONSUMER_CONTACT_ID e o contato é sempre conferido antes de ser usado.
-const findFinalConsumerId = async () => {
-  const pinned = process.env.BLING_FINAL_CONSUMER_CONTACT_ID?.trim();
-  let id = pinned || undefined;
-  if (!id) {
-    const response = await blingRequest('/contatos?pagina=1&limite=100&criterio=1&pesquisa=Consumidor%20Final');
-    if (!response.ok) throw new Error(`Bling não retornou o Consumidor Final (HTTP ${response.status})`);
-    const row = records(await response.json()).find(item =>
-      (textValue(item.nome) ?? '').trim().toLocaleLowerCase('pt-BR') === 'consumidor final' &&
-      !textValue(item.numeroDocumento ?? item.cnpj ?? item.cpf)?.replace(/\D/g, '')
-    );
-    id = row ? textValue(row.id) : undefined;
+// Cada venda sem CPF ganha o seu próprio contato "Consumidor Final" no Bling. Um contato
+// único compartilhado fazia com que editar o cliente de um pedido no Bling alterasse todos
+// os outros pedidos ligados a ele.
+const createAnonymousContact = async (saleId: string) => {
+  const payload = { nome: `Consumidor Final - PDV ${saleId.slice(0, 8).toUpperCase()}`, situacao: 'A', tipo: 'F', indicadorIe: 9 };
+  const response = await blingRequest('/contatos', { method: 'POST', body: JSON.stringify(payload) });
+  const body = await response.json().catch(() => ({})) as { data?: { id?: string | number }; message?: string; error?: unknown };
+  if (!response.ok || !body.data?.id) {
+    const detail = body.message ?? (body.error ? JSON.stringify(body.error) : '');
+    throw new Error(`Bling não criou o contato da venda sem CPF (HTTP ${response.status})${detail ? `: ${detail.slice(0, 500)}` : ''}`);
   }
-  if (!id) throw new Error('Contato Consumidor Final sem CPF não encontrado no Bling; confira o cadastro antes de criar uma venda sem cliente');
-  const detailResponse = await blingRequest(`/contatos/${encodeURIComponent(id)}`);
-  if (!detailResponse.ok) throw new Error(`Não foi possível confirmar o contato Consumidor Final no Bling (HTTP ${detailResponse.status})`);
-  const detailBody = await detailResponse.json().catch(() => ({})) as { data?: Record<string, unknown> };
-  const detail = detailBody.data;
-  if (!detail || (textValue(detail.nome) ?? '').trim().toLocaleLowerCase('pt-BR') !== 'consumidor final' ||
-      textValue(detail.numeroDocumento ?? detail.cnpj ?? detail.cpf)?.replace(/\D/g, '')) {
-    throw new Error('O contato Consumidor Final do Bling foi alterado; venda sem cliente bloqueada para evitar associação incorreta');
-  }
+  const id = String(body.data.id);
+  console.info(JSON.stringify({ event: 'bling.anonymous_contact.created', contactId: id, saleId }));
   return id;
 };
 type SalesOrderInput = { customerId?: string; sellerId: string; salesChannelId?: string; businessUnitId?: string; categoryId?: string; items: SaleItem[]; discount: number; freight: number; observations?: string; payments: PaymentSplit[]; idempotencyKey: string; statusId?: string; clearDiscount?: boolean };
 const buildOrderPayload = async (input: SalesOrderInput) => {
-  const customerId = input.customerId ?? await findFinalConsumerId();
+  const customerId = input.customerId;
+  if (!customerId) throw new Error('Pedido sem contato no Bling: a venda precisa de um cliente ou de um contato próprio de Consumidor Final');
   const orderDate = saoPauloDate();
   const itemNotes = input.items.filter(item => item.comment?.trim()).map(item => `${item.sku}: ${item.comment?.trim()}`).join(' | ');
   const orderNotes = [input.observations?.trim(), itemNotes ? `Itens: ${itemNotes}` : undefined].filter(Boolean).join('\n');
@@ -737,7 +726,7 @@ export const getFidelizeiConnectionStatus = async () => {
   }
 };
 
-export const bling = { products: searchProducts, syncProducts, sellers: fetchSellers, paymentMethods: fetchPayments, financialCategories: fetchFinancialCategories, salesChannels: fetchSalesChannels, financialAccounts: fetchFinancialAccounts, cashEntries: fetchCashEntries, createCashEntry, findCustomer: findBlingCustomer, createCustomer: createBlingCustomer, createOrder, updateOrder, getOrderContact, findInServiceStatusId, finalizeOrder, cancelOrder, cancelDraftOrder, deleteOrder, deleteDraftOrder, generateNfce, getFiscalCapability };
+export const bling = { products: searchProducts, syncProducts, sellers: fetchSellers, paymentMethods: fetchPayments, financialCategories: fetchFinancialCategories, salesChannels: fetchSalesChannels, financialAccounts: fetchFinancialAccounts, cashEntries: fetchCashEntries, createCashEntry, findCustomer: findBlingCustomer, createCustomer: createBlingCustomer, createOrder, updateOrder, getOrderContact, createAnonymousContact, findInServiceStatusId, finalizeOrder, cancelOrder, cancelDraftOrder, deleteOrder, deleteDraftOrder, generateNfce, getFiscalCapability };
 export const fidelizei = {
   findCustomer: async (cpf: string) => {
     const normalized = cpf.replace(/\D/g, '');

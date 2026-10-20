@@ -589,7 +589,7 @@ app.post('/admin/audit/order-customers/check', async (req) => {
   for (const { data: sale } of rows.rows) {
     try {
       const current = await bling.getOrderContact(sale.blingOrderId!);
-      const expected = { id: sale.customer?.bling?.id, name: sale.customer?.name ?? 'Consumidor Final', cpf: sale.customer?.cpf };
+      const expected = { id: sale.customer?.bling?.id ?? sale.blingAnonymousContactId, name: sale.customer?.name ?? 'Consumidor Final', cpf: sale.customer?.cpf };
       const mismatch = expected.id ? current.id !== expected.id : expected.cpf
         ? current.cpf !== expected.cpf
         : current.name.trim().toLocaleLowerCase('pt-BR') !== 'consumidor final' || Boolean(current.cpf);
@@ -961,7 +961,7 @@ const canonicalSaleItems = async (requested: SaleItem[]) => {
   });
 };
 const blingOrderInput = (sale: Sale, session: any, payments: PaymentSplit[] = sale.payments ?? []) => ({
-  customerId: sale.customer?.bling?.id,
+  customerId: sale.customer?.bling?.id ?? sale.blingAnonymousContactId,
   sellerId: sale.sellerId,
   categoryId: sale.categoryId,
   items: sale.items,
@@ -974,10 +974,16 @@ const blingOrderInput = (sale: Sale, session: any, payments: PaymentSplit[] = sa
   idempotencyKey: sale.id,
   statusId: sale.blingDraftStatusId
 });
+const ensureAnonymousContact = async (sale: Sale) => {
+  if (sale.customer?.bling?.id || sale.blingAnonymousContactId) return false;
+  sale.blingAnonymousContactId = await bling.createAnonymousContact(sale.id);
+  return true;
+};
 const assertBlingOrderCustomer = async (sale: Sale) => {
   if (!sale.blingOrderId) return;
   const linked = await bling.getOrderContact(sale.blingOrderId);
-  const expectedId = sale.customer?.bling?.id;
+  // Vendas antigas, sem contato próprio, ainda apontam para o Consumidor Final compartilhado.
+  const expectedId = sale.customer?.bling?.id ?? sale.blingAnonymousContactId;
   const intact = expectedId
     ? linked.id === expectedId
     : linked.name.trim().toLocaleLowerCase('pt-BR') === 'consumidor final' && !linked.cpf;
@@ -1043,9 +1049,10 @@ app.post('/sales', async (req) => {
     createdAt: new Date().toISOString()
   };
   sale.blingDraftStatusId = await bling.findInServiceStatusId();
+  await ensureAnonymousContact(sale);
   const order = await bling.createOrder(blingOrderInput(sale, session, []));
   const createdContact = await bling.getOrderContact(order.id);
-  if (sale.customer?.bling?.id && createdContact.id !== sale.customer.bling.id) {
+  if (createdContact.id !== (sale.customer?.bling?.id ?? sale.blingAnonymousContactId)) {
     throw new Error('Bling criou o pedido com um contato diferente do cliente confirmado; a venda não será vinculada no PDV');
   }
   sale.blingOrderId = order.id;
@@ -1099,6 +1106,7 @@ app.put('/sales/:id', async (req) => {
   });
   sale.freight = freight;
   sale.blingDraftStatusId ??= await bling.findInServiceStatusId();
+  await ensureAnonymousContact(sale);
   // O rascunho local é a fonte de verdade da tela. Assim, uma rejeição temporária
   // do Bling nunca mistura nem apaga o estado de outro pedido durante a troca.
   await persist(sale);
@@ -1107,7 +1115,7 @@ app.put('/sales/:id', async (req) => {
       ? await bling.updateOrder(sale.blingOrderId, blingOrderInput(sale, session, []))
       : await bling.createOrder(blingOrderInput(sale, session, []));
     const savedContact = await bling.getOrderContact(order.id);
-    if (sale.customer?.bling?.id && savedContact.id !== sale.customer.bling.id) {
+    if (savedContact.id !== (sale.customer?.bling?.id ?? sale.blingAnonymousContactId)) {
       throw new Error('Bling retornou um contato diferente do cliente confirmado para este pedido');
     }
     sale.blingOrderId = order.id;
@@ -1283,6 +1291,7 @@ app.post('/sales/:id/complete', async (req) => {
   const session = await cashSessionById(original.cashSessionId);
   if (!session || session.status !== 'OPEN') return badRequest('O caixa desta venda não está mais aberto');
   await assertBlingOrderCustomer(original);
+  if (await ensureAnonymousContact(original)) await persist(original);
 
   const requested = Array.isArray(body.payments) && body.payments.length
     ? body.payments

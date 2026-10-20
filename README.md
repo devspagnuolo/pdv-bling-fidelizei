@@ -21,4 +21,6 @@ Falhas após o pedido entram em `RECONCILIATION_REQUIRED`, evitando perda silenc
 
 ## Cliente sem cadastro
 
-Vendas sem CPF usam o contato **Consumidor Final** do Bling, que é compartilhado por todas elas. Nunca edite esse contato no Bling para registrar um cliente novo: a alteração aparece em todos os pedidos vinculados a ele. Para identificar o cliente, informe o CPF na etapa *Cliente* do PDV e use **Cadastrar no Bling**; o PDV cria um contato novo e troca apenas o contato da venda em tela.
+Cada venda sem CPF cria no Bling um contato próprio, sem documento, chamado `Consumidor Final - PDV <código>`. Nenhum pedido do PDV compartilha contato com outro, então alterar o cliente de um pedido no Bling não muda os demais. Para identificar o cliente, informe o CPF na etapa *Cliente* do PDV e use **Cadastrar no Bling**: o PDV cria um contato novo e troca apenas o contato da venda em tela.
+
+Vendas antigas que ainda apontam para o Consumidor Final compartilhado recebem um contato próprio na próxima vez que forem salvas ou finalizadas pelo PDV.
