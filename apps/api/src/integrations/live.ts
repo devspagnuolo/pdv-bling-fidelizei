@@ -250,14 +250,22 @@ const createBlingCustomer = async (input: { name: string; cpf: string; phone?: s
   console.info(JSON.stringify({ event: 'bling.customer.created', contactId: createdId }));
   return { id: createdId, cpf, name: payload.nome, phone: input.phone, email: input.email, idempotent: false };
 };
+// Todas as vendas sem identificação compartilham este único contato no Bling. Se alguém
+// editar o Consumidor Final (por exemplo, para "cadastrar" um cliente novo), todos os
+// pedidos vinculados a ele passam a exibir esses dados. Por isso o ID pode ser fixado em
+// BLING_FINAL_CONSUMER_CONTACT_ID e o contato é sempre conferido antes de ser usado.
 const findFinalConsumerId = async () => {
-  const response = await blingRequest('/contatos?pagina=1&limite=100&criterio=1&pesquisa=Consumidor%20Final');
-  if (!response.ok) throw new Error(`Bling não retornou o Consumidor Final (HTTP ${response.status})`);
-  const row = records(await response.json()).find(item =>
-    (textValue(item.nome) ?? '').trim().toLocaleLowerCase('pt-BR') === 'consumidor final' &&
-    !textValue(item.numeroDocumento ?? item.cnpj ?? item.cpf)?.replace(/\D/g, '')
-  );
-  const id = row ? textValue(row.id) : undefined;
+  const pinned = process.env.BLING_FINAL_CONSUMER_CONTACT_ID?.trim();
+  let id = pinned || undefined;
+  if (!id) {
+    const response = await blingRequest('/contatos?pagina=1&limite=100&criterio=1&pesquisa=Consumidor%20Final');
+    if (!response.ok) throw new Error(`Bling não retornou o Consumidor Final (HTTP ${response.status})`);
+    const row = records(await response.json()).find(item =>
+      (textValue(item.nome) ?? '').trim().toLocaleLowerCase('pt-BR') === 'consumidor final' &&
+      !textValue(item.numeroDocumento ?? item.cnpj ?? item.cpf)?.replace(/\D/g, '')
+    );
+    id = row ? textValue(row.id) : undefined;
+  }
   if (!id) throw new Error('Contato Consumidor Final sem CPF não encontrado no Bling; confira o cadastro antes de criar uma venda sem cliente');
   const detailResponse = await blingRequest(`/contatos/${encodeURIComponent(id)}`);
   if (!detailResponse.ok) throw new Error(`Não foi possível confirmar o contato Consumidor Final no Bling (HTTP ${detailResponse.status})`);
