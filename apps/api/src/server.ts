@@ -1057,7 +1057,7 @@ app.put('/sales/:id', async (req) => {
   const sale = await getSale((req.params as { id: string }).id);
   if (!sale) return badRequest('Venda em atendimento não encontrada');
   if (sale.status !== 'OPEN') return conflict('Somente vendas em atendimento podem ser atualizadas');
-  const body = req.body as { sellerId?: string; categoryId?: string; items?: SaleItem[]; customerCpf?: string; manualDiscount?: number; freight?: number; observations?: string; emitFiscal?: boolean; payments?: PaymentSplit[]; draftStep?: Sale['draftStep'] };
+  const body = req.body as { sellerId?: string; categoryId?: string; items?: SaleItem[]; customerCpf?: string; customerSaleId?: string; manualDiscount?: number; freight?: number; observations?: string; emitFiscal?: boolean; payments?: PaymentSplit[]; draftStep?: Sale['draftStep'] };
   if (!body.items?.length) return badRequest('Adicione ao menos um produto');
   const session = await cashSessionById(sale.cashSessionId);
   if (!session || session.status !== 'OPEN') return badRequest('O caixa desta venda não está mais aberto');
@@ -1067,6 +1067,9 @@ app.put('/sales/:id', async (req) => {
   let updatedCustomer = sale.customer;
   if (requestedCpf) {
     if (sale.customer?.cpf && sale.customer.cpf !== requestedCpf) return conflict('A troca de cliente de um pedido já identificado foi bloqueada. Confira o pedido antes de fazer uma correção administrativa');
+    // Um cliente só entra num pedido sem identificação se foi consultado/cadastrado com
+    // esta mesma venda em tela. Evita que um cadastro feito numa venda caia em outra.
+    if (!sale.customer?.cpf && body.customerSaleId !== sale.id) return conflict('O cliente informado foi consultado em outra venda e não foi vinculado a este pedido. Consulte o CPF novamente nesta venda');
     const lookup = await lookupCustomer(requestedCpf);
     if (!lookup.found || !lookup.bling?.id || lookup.bling.cpf !== requestedCpf) return conflict('Cliente não confirmado no Bling. O cliente anterior foi preservado');
     updatedCustomer = lookup;

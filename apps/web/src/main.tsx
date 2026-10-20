@@ -17,6 +17,8 @@ type PaymentMethod = {
 type CustomerLookup = {
   found: boolean;
   cpf: string;
+  // Venda em tela no momento da consulta. O servidor recusa vincular este cliente a outra venda.
+  forSaleId?: string;
   name?: string;
   bling?: { id: string; cpf: string; name: string; email?: string; phone?: string };
   fidelizei?: {
@@ -458,13 +460,17 @@ function App() {
     }, 85);
   };
 
-  const lookup = async () => {
+  const lookup = async (requestedCpf = cpf, generation = saleGenerationRef.current) => {
     setMessage('');
     setCustomer(undefined);
-    const r = await apiFetch(`${api}/customers/${cpf}`);
+    const forSaleId = activeSaleRef.current?.id;
+    const r = await apiFetch(`${api}/customers/${requestedCpf}`);
     const data = await r.json().catch(() => undefined);
+    // O operador pode ter trocado de venda enquanto a consulta estava em andamento.
+    // Aplicar o resultado agora vincularia este cliente ao pedido errado.
+    if (generation !== saleGenerationRef.current) return;
     if (!r.ok) return setMessage(data?.message ?? 'Não foi possível consultar o cliente.');
-    setCustomer(data);
+    setCustomer({ ...data, forSaleId });
     setCustomerName(data.name ?? '');
     setCustomerPhone(data.bling?.phone ?? '');
     setCustomerEmail(data.bling?.email ?? '');
@@ -517,6 +523,7 @@ function App() {
     sellerId: seller,
     categoryId,
     customerCpf: customer?.found ? customer.cpf : undefined,
+    customerSaleId: customer?.found ? customer.forSaleId : undefined,
     manualDiscount,
     freight,
     observations,
@@ -574,7 +581,7 @@ function App() {
     activeSaleRef.current = draft;
     setSale(draft);
     setItems((draft.items ?? []).map((item: any) => ({ id: item.productId, sku: item.sku, name: item.name, quantity: item.quantity, price: item.unitPrice, stock: 0, comment: item.comment })));
-    setCustomer(draft.customer);
+    setCustomer(draft.customer ? { ...draft.customer, forSaleId: draft.id } : undefined);
     setCpf(draft.customer?.cpf ?? '');
     setFidelizeiPhone(draft.customer?.fidelizei?.phone ?? draft.customer?.bling?.phone ?? '');
     setFidelizeiEmail(draft.customer?.fidelizei?.email ?? draft.customer?.bling?.email ?? '');
@@ -626,6 +633,8 @@ function App() {
 
   const enrollFidelizei = async () => {
     if (!customer?.bling || !programConsent) return;
+    const generation = saleGenerationRef.current;
+    const enrolledCpf = customer.cpf;
     setMessage('');
     const response = await apiFetch(`${api}/customers/fidelizei`, {
       method: 'POST',
@@ -640,7 +649,8 @@ function App() {
     });
     const data = await response.json().catch(() => undefined);
     if (!response.ok) return setMessage(data?.message ?? 'Não foi possível cadastrar a cliente no Fidelizei.');
-    await lookup();
+    if (generation !== saleGenerationRef.current) return setMessage('Cliente cadastrado no Fidelizei. A venda em tela mudou; consulte o CPF novamente na venda correta.');
+    await lookup(enrolledCpf, generation);
     setProgramConsent(false);
     const emailConfirmed = data?.welcomeEmailSent || data?.temporaryPasswordSent;
     setMessage(emailConfirmed
@@ -652,6 +662,8 @@ function App() {
     if (customerPostalCode.replace(/\D/g, '').length !== 8 || !customerStreet.trim() || !customerAddressNumber.trim() || !customerNeighborhood.trim() || !customerCity.trim() || !/^[A-Za-z]{2}$/.test(customerState.trim())) {
       return setMessage('Informe o endereço completo: CEP, logradouro, número, bairro, município e UF.');
     }
+    const generation = saleGenerationRef.current;
+    const registeredCpf = cpf;
     setCustomerSaving(true);
     setMessage('');
     try {
@@ -678,7 +690,10 @@ function App() {
         fidelizeiCreated = true;
         fidelizeiEmailConfirmed = Boolean(fidelizeiData?.welcomeEmailSent || fidelizeiData?.temporaryPasswordSent);
       }
-      await lookup();
+      if (generation !== saleGenerationRef.current) {
+        return setMessage('Cliente cadastrado, mas a venda em tela mudou durante o cadastro. Ele não foi vinculado a nenhum pedido; consulte o CPF na venda correta.');
+      }
+      await lookup(registeredCpf, generation);
       setProgramConsent(false);
       setMessage(fidelizeiCreated
         ? fidelizeiEmailConfirmed
@@ -1116,7 +1131,7 @@ function App() {
 
         {step === 'customer' && <>
           <div className="section-title"><div><small>ETAPA 2</small><h2>Identificar cliente</h2></div><span>Bling + Fidelizei</span></div>
-          <label>CPF<div className="row"><input value={cpf} onChange={e => { setCpf(e.target.value); setCustomer(undefined); setMessage(''); }} placeholder="000.000.000-00" /><button onClick={lookup}>Consultar</button></div></label>
+          <label>CPF<div className="row"><input value={cpf} onChange={e => { setCpf(e.target.value); setCustomer(undefined); setMessage(''); }} placeholder="000.000.000-00" /><button onClick={() => void lookup()}>Consultar</button></div></label>
           {!customer && <div className="customer-card final-consumer"><div><span className="vip">PADRÃO BLING</span><h3>Consumidor Final</h3><p>Identificação opcional. A venda pode seguir normalmente sem CPF.</p></div><button onClick={() => setStep('payment')}>Continuar sem identificar</button></div>}
           {customer?.found ? <div className="customer-card unified">
             <div className="customer-identity">
