@@ -100,6 +100,35 @@ export const initializeDatabase = async () => {
     await pool.query(`drop trigger if exists ${trigger} on ${table}`);
     await pool.query(`create trigger ${trigger} before update or delete on ${table} for each row execute function prevent_pdv_audit_mutation()`);
   }
+  await pool.query(`create or replace function audit_pdv_sale_customer() returns trigger language plpgsql as $$
+    declare before_customer jsonb; after_customer jsonb;
+    begin
+      before_customer := case when TG_OP = 'INSERT' then null else jsonb_build_object(
+        'name', coalesce(OLD.data #>> '{customer,name}', 'Consumidor Final'),
+        'cpf', OLD.data #>> '{customer,cpf}',
+        'blingContactId', OLD.data #>> '{customer,bling,id}') end;
+      after_customer := jsonb_build_object(
+        'name', coalesce(NEW.data #>> '{customer,name}', 'Consumidor Final'),
+        'cpf', NEW.data #>> '{customer,cpf}',
+        'blingContactId', NEW.data #>> '{customer,bling,id}');
+      if TG_OP = 'INSERT' or before_customer is distinct from after_customer then
+        insert into pdv_admin_audit_logs
+          (id,actor_id,actor_name,actor_role,action,entity_type,entity_id,previous_value,new_value,terminal)
+        values (gen_random_uuid(), 'pdv-database', 'PDV (autor da mudança não identificado)', 'SYSTEM',
+          case when TG_OP = 'INSERT' then 'CUSTOMER_INITIAL' else 'CUSTOMER_CHANGED' end,
+          'sale', NEW.id::text,
+          case when TG_OP = 'INSERT' then null else jsonb_build_object('customer',before_customer) end,
+          jsonb_build_object('customer',after_customer,'blingOrderNumber',NEW.data->>'blingOrderNumber',
+            'saleOperatorId',NEW.data->>'operatorId',
+            'reason',case when TG_OP = 'INSERT' then 'Cliente registrado na abertura do pedido' else 'Cliente alterado no PDV; motivo não informado' end),
+          'PDV');
+      end if;
+      return NEW;
+    end;
+  $$`);
+  await pool.query('drop trigger if exists pdv_sale_customer_audit on pdv_sales');
+  await pool.query(`create trigger pdv_sale_customer_audit after insert or update of data on pdv_sales
+    for each row execute function audit_pdv_sale_customer()`);
   await pool.query(`insert into pdv_cash_closing_versions (id, session_id, version, closing_summary, closed_at, closed_by)
     select gen_random_uuid(), id, 1, closing_summary, coalesce(closed_at, opened_at), operator_id
     from pdv_cash_sessions where status='CLOSED' and closing_summary is not null
@@ -122,4 +151,5 @@ export const initializeDatabase = async () => {
     where status in ('PENDING','PROCESSING','FAILED','DEAD')`);
   await pool.query('delete from oauth_states where expires_at < now()');
 };
+
 

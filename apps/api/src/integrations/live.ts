@@ -317,6 +317,23 @@ const readOrderDetails = async (id: string, isReady?: (details: Record<string, u
   return details;
 };
 const readOrderNumber = async (id: string) => textValue((await readOrderDetails(id, details => Boolean(textValue(details.numero))))?.numero);
+const getOrderContact = async (orderId: string) => {
+  const order = await readOrderDetails(orderId);
+  if (!order) throw new Error(`Bling não retornou o pedido ${orderId} para conferência`);
+  const linked = order.contato as Record<string, unknown> | undefined;
+  const id = textValue(linked?.id);
+  if (!id) throw new Error(`Bling não informou o contato do pedido ${orderId}`);
+  const response = await blingRequest(`/contatos/${encodeURIComponent(id)}`);
+  if (!response.ok) throw new Error(`Bling não retornou o contato ${id} (HTTP ${response.status})`);
+  const body = await response.json().catch(() => ({})) as { data?: Record<string, unknown> };
+  const detail = body.data;
+  if (!detail) throw new Error(`Bling retornou o contato ${id} sem dados`);
+  return {
+    id,
+    name: textValue(detail.nome ?? linked?.nome) ?? 'Nome não informado',
+    cpf: textValue(detail.numeroDocumento ?? detail.cnpj ?? detail.cpf)?.replace(/\D/g, '') || undefined
+  };
+};
 const verifyOrderDiscount = (details: Record<string, unknown> | undefined, input: SalesOrderInput) => {
   if (input.discount <= 0 && !input.clearDiscount) return;
   if (!details) throw new Error('Bling aceitou a atualização, mas não foi possível confirmar o desconto salvo no pedido');
@@ -712,7 +729,7 @@ export const getFidelizeiConnectionStatus = async () => {
   }
 };
 
-export const bling = { products: searchProducts, syncProducts, sellers: fetchSellers, paymentMethods: fetchPayments, financialCategories: fetchFinancialCategories, salesChannels: fetchSalesChannels, financialAccounts: fetchFinancialAccounts, cashEntries: fetchCashEntries, createCashEntry, findCustomer: findBlingCustomer, createCustomer: createBlingCustomer, createOrder, updateOrder, findInServiceStatusId, finalizeOrder, cancelOrder, cancelDraftOrder, deleteOrder, deleteDraftOrder, generateNfce, getFiscalCapability };
+export const bling = { products: searchProducts, syncProducts, sellers: fetchSellers, paymentMethods: fetchPayments, financialCategories: fetchFinancialCategories, salesChannels: fetchSalesChannels, financialAccounts: fetchFinancialAccounts, cashEntries: fetchCashEntries, createCashEntry, findCustomer: findBlingCustomer, createCustomer: createBlingCustomer, createOrder, updateOrder, getOrderContact, findInServiceStatusId, finalizeOrder, cancelOrder, cancelDraftOrder, deleteOrder, deleteDraftOrder, generateNfce, getFiscalCapability };
 export const fidelizei = {
   findCustomer: async (cpf: string) => {
     const normalized = cpf.replace(/\D/g, '');

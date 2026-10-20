@@ -552,6 +552,66 @@ app.get('/admin/audit', async (req) => {
   return {events:result.rows,page,pageSize,totalRows:count.rows[0]?.count??0};
 });
 
+app.get('/admin/audit/order-customers', async (req) => {
+  requireAdminOrManager(req);
+  const database = requireDatabase();
+  const query = req.query as { from?: string; to?: string; number?: string; page?: string };
+  const values: unknown[] = [];
+  const filters = ["a.entity_type = 'sale'", "a.action in ('CUSTOMER_INITIAL','CUSTOMER_CHANGED','BLING_CONTACT_BASELINE','BLING_CONTACT_MISMATCH','BLING_CONTACT_CHANGED')"];
+  const add = (value: unknown) => { values.push(value); return `$${values.length}`; };
+  if (query.from) filters.push(`(s.data->>'createdAt')::timestamptz >= (${add(query.from)}::date::timestamp at time zone 'America/Sao_Paulo')`);
+  if (query.to) filters.push(`(s.data->>'createdAt')::timestamptz < ((${add(query.to)}::date + 1)::timestamp at time zone 'America/Sao_Paulo')`);
+  if (query.number?.trim()) filters.push(`s.data->>'blingOrderNumber' = ${add(query.number.trim())}`);
+  const where = `where ${filters.join(' and ')}`;
+  const page = Math.max(1, Number(query.page) || 1), pageSize = 25;
+  const count = await database.query(`select count(*)::int count from pdv_admin_audit_logs a left join pdv_sales s on s.id::text=a.entity_id ${where}`, values) as { rows: { count: number }[] };
+  values.push(pageSize, (page - 1) * pageSize);
+  const result = await database.query(`select a.id,a.action,a.previous_value "previousValue",a.new_value "newValue",a.actor_name "observer",a.created_at "createdAt",s.data->>'blingOrderNumber' "orderNumber",s.data->>'status' "saleStatus"
+    from pdv_admin_audit_logs a left join pdv_sales s on s.id::text=a.entity_id ${where}
+    order by a.created_at desc limit $${values.length - 1} offset $${values.length}`, values) as { rows: unknown[] };
+  return { events: result.rows, page, pageSize, totalRows: count.rows[0]?.count ?? 0 };
+});
+
+app.post('/admin/audit/order-customers/check', async (req) => {
+  requireAdminOrManager(req);
+  const database = requireDatabase();
+  const body = (req.body ?? {}) as { from?: string; to?: string; page?: number; number?: string };
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(body.from ?? '') || !/^\d{4}-\d{2}-\d{2}$/.test(body.to ?? '') || body.from! > body.to!) return badRequest('Informe um período válido para conferir os pedidos');
+  const page = Math.max(1, Number(body.page) || 1);
+  const values: unknown[] = [body.from, body.to];
+  const numberFilter = body.number?.trim() ? `and data->>'blingOrderNumber' = $3` : '';
+  if (numberFilter) values.push(body.number!.trim());
+  values.push(20, (page - 1) * 20);
+  const rows = await database.query(`select data from pdv_sales where (data->>'createdAt')::timestamptz >= ($1::date::timestamp at time zone 'America/Sao_Paulo') and (data->>'createdAt')::timestamptz < (($2::date + 1)::timestamp at time zone 'America/Sao_Paulo') ${numberFilter} and data->>'blingOrderId' is not null
+    order by data->>'createdAt' desc limit $${values.length - 1} offset $${values.length}`, values) as { rows: { data: Sale }[] };
+  let mismatches = 0, recorded = 0;
+  const errors: { orderNumber?: string; message: string }[] = [];
+  for (const { data: sale } of rows.rows) {
+    try {
+      const current = await bling.getOrderContact(sale.blingOrderId!);
+      const expected = { id: sale.customer?.bling?.id, name: sale.customer?.name ?? 'Consumidor Final', cpf: sale.customer?.cpf };
+      const mismatch = expected.id ? current.id !== expected.id : expected.cpf
+        ? current.cpf !== expected.cpf
+        : current.name.trim().toLocaleLowerCase('pt-BR') !== 'consumidor final' || Boolean(current.cpf);
+      if (mismatch) mismatches++;
+      const previous = await database.query(`select new_value "newValue" from pdv_admin_audit_logs where entity_type='sale' and entity_id=$1 and action in ('BLING_CONTACT_BASELINE','BLING_CONTACT_MISMATCH','BLING_CONTACT_CHANGED') order by created_at desc limit 1`, [sale.id]) as { rows: { newValue?: { bling?: typeof current } }[] };
+      const prior = previous.rows[0]?.newValue?.bling;
+      const changed = prior && (prior.id !== current.id || prior.name !== current.name || prior.cpf !== current.cpf);
+      if (!prior || changed) {
+        const action = changed ? 'BLING_CONTACT_CHANGED' : mismatch ? 'BLING_CONTACT_MISMATCH' : 'BLING_CONTACT_BASELINE';
+        await writeAdminAudit(req, action, 'sale', sale.id,
+          prior ? { bling: prior } : { pdv: expected },
+          { bling: current, pdv: expected, blingOrderNumber: sale.blingOrderNumber,
+            reason: changed ? 'Mudança no contato do Bling detectada entre duas conferências; autor e momento exato não disponíveis nesta integração' : mismatch ? 'Divergência entre o cliente salvo no PDV e o contato atual do Bling; momento da alteração desconhecido' : 'Primeira conferência do contato atual no Bling' });
+        recorded++;
+      }
+    } catch (error) {
+      errors.push({ orderNumber: sale.blingOrderNumber, message: error instanceof Error ? error.message : 'Falha ao consultar pedido no Bling' });
+    }
+  }
+  return { checked: rows.rows.length, mismatches, recorded, errors, page, hasMore: rows.rows.length === 20 };
+});
+
 app.get('/admin/catalog', async () => { const [sellers,paymentMethods,configuration]=await Promise.all([bling.sellers(),bling.paymentMethods(),Promise.all([bling.financialAccounts(),bling.salesChannels()])]);return {sellers,paymentMethods,accounts:configuration[0],channels:configuration[1]}; });
 
 app.get('/cash/accounts', async () => bling.financialAccounts());
@@ -914,6 +974,15 @@ const blingOrderInput = (sale: Sale, session: any, payments: PaymentSplit[] = sa
   idempotencyKey: sale.id,
   statusId: sale.blingDraftStatusId
 });
+const assertBlingOrderCustomer = async (sale: Sale) => {
+  if (!sale.blingOrderId) return;
+  const linked = await bling.getOrderContact(sale.blingOrderId);
+  const expectedId = sale.customer?.bling?.id;
+  const intact = expectedId
+    ? linked.id === expectedId
+    : linked.name.trim().toLocaleLowerCase('pt-BR') === 'consumidor final' && !linked.cpf;
+  if (!intact) return conflict('O cliente do pedido no Bling diverge do PDV. A operação foi bloqueada para não substituir o contato; confira a auditoria no Admin');
+};
 app.post('/sales', async (req) => {
   const body = req.body as {
     cashSessionId?: string;
@@ -938,6 +1007,7 @@ app.post('/sales', async (req) => {
   if (session.operatorId !== operatorId) return badRequest('A venda deve usar o operador responsável pelo caixa aberto');
   const items = await canonicalSaleItems(body.items);
   const lookup = body.customerCpf ? await lookupCustomer(body.customerCpf) : undefined;
+  if (body.customerCpf && (!lookup?.found || !lookup.bling?.id)) return conflict('Cliente não confirmado no Bling. O pedido não foi criado para evitar vínculo incorreto');
   const customer = lookup?.found ? lookup : undefined;
   const manualDiscount = money(Math.max(0, Number(body.manualDiscount) || 0));
   const freight = money(Math.max(0, Number(body.freight) || 0));
@@ -974,6 +1044,10 @@ app.post('/sales', async (req) => {
   };
   sale.blingDraftStatusId = await bling.findInServiceStatusId();
   const order = await bling.createOrder(blingOrderInput(sale, session, []));
+  const createdContact = await bling.getOrderContact(order.id);
+  if (sale.customer?.bling?.id && createdContact.id !== sale.customer.bling.id) {
+    throw new Error('Bling criou o pedido com um contato diferente do cliente confirmado; a venda não será vinculada no PDV');
+  }
   sale.blingOrderId = order.id;
   sale.blingOrderNumber = order.number;
   await persist(sale);
@@ -987,8 +1061,16 @@ app.put('/sales/:id', async (req) => {
   if (!body.items?.length) return badRequest('Adicione ao menos um produto');
   const session = await cashSessionById(sale.cashSessionId);
   if (!session || session.status !== 'OPEN') return badRequest('O caixa desta venda não está mais aberto');
+  await assertBlingOrderCustomer(sale);
   const items = await canonicalSaleItems(body.items);
-  const lookup = body.customerCpf ? await lookupCustomer(body.customerCpf) : undefined;
+  const requestedCpf = body.customerCpf?.replace(/\D/g, '');
+  let updatedCustomer = sale.customer;
+  if (requestedCpf) {
+    if (sale.customer?.cpf && sale.customer.cpf !== requestedCpf) return conflict('A troca de cliente de um pedido já identificado foi bloqueada. Confira o pedido antes de fazer uma correção administrativa');
+    const lookup = await lookupCustomer(requestedCpf);
+    if (!lookup.found || !lookup.bling?.id || lookup.bling.cpf !== requestedCpf) return conflict('Cliente não confirmado no Bling. O cliente anterior foi preservado');
+    updatedCustomer = lookup;
+  }
   const categories = await bling.financialCategories();
   const category = categories.find(item => item.id === body.categoryId) ?? categories.find(item => item.id === sale.categoryId);
   if (!category) return badRequest('A categoria financeira da venda não foi encontrada no Bling');
@@ -998,7 +1080,7 @@ app.put('/sales/:id', async (req) => {
     sellerId: body.sellerId || sale.sellerId,
     categoryId: category.id,
     categoryName: category.name,
-    customer: lookup?.found ? lookup : undefined,
+    customer: updatedCustomer,
     items,
     manualDiscount,
     observations: body.observations?.trim().slice(0, 2000) || undefined,
@@ -1021,6 +1103,10 @@ app.put('/sales/:id', async (req) => {
     const order = sale.blingOrderId
       ? await bling.updateOrder(sale.blingOrderId, blingOrderInput(sale, session, []))
       : await bling.createOrder(blingOrderInput(sale, session, []));
+    const savedContact = await bling.getOrderContact(order.id);
+    if (sale.customer?.bling?.id && savedContact.id !== sale.customer.bling.id) {
+      throw new Error('Bling retornou um contato diferente do cliente confirmado para este pedido');
+    }
     sale.blingOrderId = order.id;
     sale.blingOrderNumber = order.number ?? sale.blingOrderNumber;
     sale.draftSyncStatus = 'SYNCED';
@@ -1087,6 +1173,7 @@ app.post('/sales/:id/coupon', async (req) => {
 
             const session = await cashSessionById(sale.cashSessionId);
       if (!session || session.status !== 'OPEN' || !sale.blingOrderId) return conflict('O pedido precisa estar aberto e salvo no Bling antes de aplicar o cupom');
+      await assertBlingOrderCustomer(sale);
       const customerCpf = sale.customer.fidelizei.cpf;
       const preview = await fidelizei.previewCoupon(code, sale.id, sale.subtotal, customerCpf);
       const discountedSale: Sale = {
@@ -1192,6 +1279,7 @@ app.post('/sales/:id/complete', async (req) => {
   if (original.status !== 'OPEN') return conflict('Venda já está sendo processada ou foi concluída');
   const session = await cashSessionById(original.cashSessionId);
   if (!session || session.status !== 'OPEN') return badRequest('O caixa desta venda não está mais aberto');
+  await assertBlingOrderCustomer(original);
 
   const requested = Array.isArray(body.payments) && body.payments.length
     ? body.payments
