@@ -11,10 +11,13 @@ import {
 import { initializeDatabase, pool, withTransaction } from './db.js';
 import { money, type Customer, type PaymentSplit, type Sale, type SaleItem } from './domain.js';
 import { getWebhookHealth, registerBlingWebhooks } from './webhooks.js';
-import { authConfigured, authenticatePin, issueToken, principalFromRequest, verifyToken } from './auth.js';
+import { authConfigured, authenticatePin, authRequired, bearerToken, hashPin, individualPinRequired, issueToken, principalFromRequest, validPinFormat, verifyPinHash, verifyToken, type AuthPrincipal } from './auth.js';
+import { AttemptLimiter } from './limiter.js';
 import { canAccessOperatorResource, isSupervisor, reversalRequiresSupervisor } from './access.js';
 
-const app = Fastify({ logger: true });
+// O Render entrega as requisições por um proxy; sem trustProxy, req.ip é o IP interno
+// do proxy e o limite de tentativas de login e a auditoria perdem o IP real da loja.
+const app = Fastify({ logger: true, trustProxy: true });
 app.removeContentTypeParser('application/json');
 app.addContentTypeParser('application/json', { parseAs: 'buffer' }, (req, body, done) => {
   try {
@@ -34,23 +37,38 @@ await app.register(cors, {
   methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['authorization', 'content-type']
 });
-const loginAttempts = new Map<string, { count: number; resetAt: number }>();
+const ipLoginLimiter = new AttemptLimiter(20, 15 * 60_000);
+const operatorLoginLimiter = new AttemptLimiter(5, 15 * 60_000);
+const adminPinLimiter = new AttemptLimiter(10, 15 * 60_000);
+const isTokenRevoked = async (principal: AuthPrincipal) => {
+  if (!pool || !principal.jti) return false;
+  const result = await pool.query('select 1 from pdv_revoked_tokens where jti=$1', [principal.jti]) as { rows: unknown[] };
+  return result.rows.length > 0;
+};
 app.addHook('preHandler', async (req, reply) => {
   const path = req.url.split('?')[0];
   const protectedRoute = path.startsWith('/sales') || path.startsWith('/customers') ||
     path.startsWith('/cash') || path.startsWith('/operations') ||
     (path.startsWith('/admin') && path !== '/admin/login') ||
-    (path === '/catalog/products/sync');
+    path === '/catalog/products/sync' || path === '/integrations/bling/connect' || path === '/auth/logout';
   if (!protectedRoute) return;
   if (!authConfigured()) {
-    if (path.startsWith('/operations')) return reply.code(503).send({ message: 'Configure a autenticação do PDV antes de acessar dados operacionais' });
+    if (authRequired() || path.startsWith('/operations')) return reply.code(503).send({ message: 'Configure a autenticação do PDV antes de acessar dados operacionais' });
     return;
   }
-  const authorization = req.headers.authorization;
-  const token = authorization?.startsWith('Bearer ') ? authorization.slice(7) : undefined;
-  const principal = verifyToken(token);
-  if (!principal) return reply.code(401).send({ message: 'Sessão expirada ou acesso não autorizado' });
+  const principal = verifyToken(bearerToken(req));
+  if (!principal || await isTokenRevoked(principal)) return reply.code(401).send({ message: 'Sessão expirada ou acesso não autorizado' });
   (req as typeof req & { auth?: typeof principal }).auth = principal;
+});
+app.setErrorHandler((error: Error & { statusCode?: number; code?: string }, req, reply) => {
+  const statusCode = error.statusCode && error.statusCode >= 400 ? error.statusCode : 500;
+  if (statusCode >= 500) req.log.error({ err: error }, 'Falha ao processar a requisição');
+  // Erros do banco podem trazer nomes de tabelas e trechos de SQL; não vão para a tela.
+  const fromDatabase = typeof error.code === 'string' && /^[0-9A-Z]{5}$/.test(error.code) && !error.statusCode;
+  const message = fromDatabase
+    ? `Falha interna ao gravar ou consultar dados do PDV (ref. ${req.id})`
+    : (error.message || 'Falha inesperada').slice(0, 1000);
+  return reply.code(statusCode).send({ statusCode, message });
 });
 const requireManager = (req: Parameters<typeof principalFromRequest>[0]) => {
   const principal = principalFromRequest(req);
@@ -193,45 +211,123 @@ app.get('/health', async (_req, reply) => {
 let integrationStatusCache: { expires: number; value: unknown } | undefined;
 let integrationStatusPromise: Promise<unknown> | undefined;
 app.get('/auth/status', async () => ({ enabled: authConfigured() }));
+const operatorCredential = async (operatorId: string) => {
+  if (!pool) return undefined;
+  const result = await pool.query('select pin_hash as "pinHash", role from pdv_operator_credentials where operator_id=$1', [operatorId]) as { rows: { pinHash: string; role: 'OPERATOR' | 'MANAGER' }[] };
+  return result.rows[0];
+};
+// PIN individual tem prioridade. Sem PIN individual cadastrado, o PIN compartilhado
+// segue válido até PDV_REQUIRE_INDIVIDUAL_PIN=1 (período de transição).
+const authenticateOperator = async (operatorId: string, pin: string): Promise<AuthPrincipal['role'] | undefined> => {
+  const credential = await operatorCredential(operatorId);
+  if (credential) return verifyPinHash(pin, credential.pinHash) ? credential.role : undefined;
+  const role = authenticatePin(pin);
+  return role === 'ADMIN' ? undefined : role;
+};
+const loginBlocked = (req: { ip: string }, operatorKey: string) =>
+  ipLoginLimiter.blocked(`ip:${req.ip}`) || operatorLoginLimiter.blocked(operatorKey);
+const registerLoginFailure = (req: { ip: string; log: { warn: (data: unknown, message: string) => void } }, operatorKey: string) => {
+  ipLoginLimiter.fail(`ip:${req.ip}`);
+  operatorLoginLimiter.fail(operatorKey);
+  req.log.warn({ ip: req.ip, operatorKey }, 'Tentativa de login recusada');
+};
 app.post('/auth/login', async (req, reply) => {
   if (!authConfigured()) return reply.code(503).send({ message: 'Autenticação do PDV ainda não configurada no servidor' });
-  const address = req.ip;
-  const current = loginAttempts.get(address);
-  if (current && current.resetAt > Date.now() && current.count >= 5) {
-    return reply.code(429).send({ message: 'Muitas tentativas. Aguarde cinco minutos' });
-  }
-  const body = req.body as { operatorId?: string; pin?: string };
-  const role = authenticatePin(String(body.pin ?? ''));
-  const seller = body.operatorId ? (await bling.sellers()).find(item => item.id === body.operatorId && item.active) : undefined;
+  const body = (req.body ?? {}) as { operatorId?: string; pin?: string };
+  const operatorId = String(body.operatorId ?? '');
+  const operatorKey = `op:${operatorId}`;
+  if (loginBlocked(req, operatorKey)) return reply.code(429).send({ message: 'Muitas tentativas. Aguarde 15 minutos ou procure a gerência' });
+  const seller = operatorId ? (await bling.sellers()).find(item => item.id === operatorId && item.active) : undefined;
+  const pin = String(body.pin ?? '');
+  const role = seller ? await authenticateOperator(seller.id, pin) ?? (authenticatePin(pin) === 'ADMIN' ? 'ADMIN' : undefined) : undefined;
   if (!role || !seller) {
-    const resetAt = current?.resetAt && current.resetAt > Date.now() ? current.resetAt : Date.now() + 5 * 60_000;
-    loginAttempts.set(address, { count: (current?.resetAt && current.resetAt > Date.now() ? current.count : 0) + 1, resetAt });
+    registerLoginFailure(req, operatorKey);
     return reply.code(401).send({ message: 'Operador ou PIN inválido' });
   }
-  loginAttempts.delete(address);
+  operatorLoginLimiter.reset(operatorKey);
   const principal = { operatorId: seller.id, operatorName: seller.name, role };
   return { token: issueToken(principal), principal };
 });
 app.post('/admin/login', async (req, reply) => {
   if (!authConfigured()) return reply.code(503).send({ message: 'Autenticação do PDV ainda não configurada no servidor.' });
-  const address = req.ip;
-  const current = loginAttempts.get(address);
-  if (current && current.resetAt > Date.now() && current.count >= 5) return reply.code(429).send({ message: 'Muitas tentativas. Aguarde cinco minutos' });
-  const body = req.body as { pin?: string; operatorId?: string };
-  const role=authenticatePin(String(body.pin ?? ''));
-  if (!role) {
-    const resetAt = current?.resetAt && current.resetAt > Date.now() ? current.resetAt : Date.now() + 5 * 60_000;
-    loginAttempts.set(address, { count: (current?.resetAt && current.resetAt > Date.now() ? current.count : 0) + 1, resetAt });
-    return reply.code(401).send({ message: 'PIN administrativo inválido' });
+  const body = (req.body ?? {}) as { pin?: string; operatorId?: string };
+  const pin = String(body.pin ?? '');
+  const operatorKey = body.operatorId ? `op:${body.operatorId}` : 'admin';
+  const limiter = body.operatorId ? operatorLoginLimiter : adminPinLimiter;
+  if (ipLoginLimiter.blocked(`ip:${req.ip}`) || limiter.blocked(operatorKey)) return reply.code(429).send({ message: 'Muitas tentativas. Aguarde 15 minutos' });
+  const fail = (message: string) => {
+    ipLoginLimiter.fail(`ip:${req.ip}`);
+    limiter.fail(operatorKey);
+    req.log.warn({ ip: req.ip, operatorKey }, 'Tentativa de login administrativo recusada');
+    return reply.code(401).send({ message });
+  };
+  if (authenticatePin(pin) === 'ADMIN') {
+    adminPinLimiter.reset('admin');
+    const principal = { operatorId: 'admin', operatorName: process.env.PDV_ADMIN_NAME || 'Administrador', role: 'ADMIN' as const };
+    return { token: issueToken(principal), principal };
   }
-  if(role!=='ADMIN'&&!body.operatorId)return reply.code(400).send({message:'Selecione seu usuário para registrar as consultas.'});
-  const seller=role==='ADMIN'?undefined:(await bling.sellers()).find(item=>item.id===body.operatorId&&item.active);
-  if(role!=='ADMIN'&&!seller)return reply.code(401).send({message:'Usuário operacional inválido.'});
-  loginAttempts.delete(address);
-  const principal = role==='ADMIN'
-    ? { operatorId: 'admin', operatorName: process.env.PDV_ADMIN_NAME || 'Administrador', role: 'ADMIN' as const }
-    : { operatorId: seller!.id, operatorName: seller!.name, role };
+  if (!body.operatorId) return fail('Selecione seu usuário ou informe o PIN de administrador.');
+  const seller = (await bling.sellers()).find(item => item.id === body.operatorId && item.active);
+  const role = seller ? await authenticateOperator(seller.id, pin) : undefined;
+  if (!seller || !role) return fail('Usuário ou PIN inválido.');
+  operatorLoginLimiter.reset(operatorKey);
+  const principal = { operatorId: seller.id, operatorName: seller.name, role };
   return { token: issueToken(principal), principal };
+});
+app.post('/auth/logout', async (req) => {
+  const principal = principalFromRequest(req);
+  if (pool && principal?.jti) {
+    await pool.query('insert into pdv_revoked_tokens (jti, expires_at) values ($1, to_timestamp($2)) on conflict do nothing', [principal.jti, principal.exp]);
+  }
+  return { loggedOut: true };
+});
+// PINs individuais: somente o administrador cadastra, troca ou remove.
+app.get('/admin/operators/credentials', async (req) => {
+  requireAdmin(req);
+  const database = requireDatabase();
+  const [sellers, credentials] = await Promise.all([
+    bling.sellers(),
+    database.query('select operator_id as "operatorId", role, updated_by as "updatedBy", updated_at as "updatedAt" from pdv_operator_credentials') as Promise<{ rows: { operatorId: string; role: string; updatedBy: string; updatedAt: string }[] }>
+  ]);
+  const byOperator = new Map(credentials.rows.map(row => [row.operatorId, row]));
+  return {
+    individualPinRequired: individualPinRequired(),
+    operators: sellers.filter(seller => seller.active).map(seller => {
+      const credential = byOperator.get(seller.id);
+      return { id: seller.id, name: seller.name, hasPin: Boolean(credential), role: credential?.role, updatedBy: credential?.updatedBy, updatedAt: credential?.updatedAt };
+    })
+  };
+});
+app.put('/admin/operators/:id/credential', async (req) => {
+  const principal = requireAdmin(req);
+  const database = requireDatabase();
+  const id = (req.params as { id: string }).id;
+  const body = (req.body ?? {}) as { pin?: string; role?: string };
+  const pin = String(body.pin ?? '');
+  if (!validPinFormat(pin)) return badRequest('O PIN deve ter de 6 a 12 dígitos numéricos');
+  if (body.role !== 'OPERATOR' && body.role !== 'MANAGER') return badRequest('Selecione o perfil: operador ou gerente');
+  if (process.env.PDV_ADMIN_PIN && pin === process.env.PDV_ADMIN_PIN) return badRequest('Escolha um PIN diferente do PIN de administrador');
+  const seller = (await bling.sellers()).find(item => item.id === id && item.active);
+  if (!seller) return badRequest('Vendedor não encontrado ou inativo no Bling');
+  const previous = await operatorCredential(id);
+  await database.query(
+    `insert into pdv_operator_credentials (operator_id, pin_hash, role, updated_by, updated_at) values ($1,$2,$3,$4,now())
+     on conflict (operator_id) do update set pin_hash=excluded.pin_hash, role=excluded.role, updated_by=excluded.updated_by, updated_at=now()`,
+    [id, hashPin(pin), body.role, principal.operatorName]
+  );
+  operatorLoginLimiter.reset(`op:${id}`);
+  await writeAdminAudit(req, previous ? 'PIN_CHANGED' : 'PIN_CREATED', 'operator', id, previous ? { role: previous.role } : null, { role: body.role, operatorName: seller.name });
+  return { id, name: seller.name, hasPin: true, role: body.role };
+});
+app.delete('/admin/operators/:id/credential', async (req) => {
+  requireAdmin(req);
+  const database = requireDatabase();
+  const id = (req.params as { id: string }).id;
+  const previous = await operatorCredential(id);
+  if (!previous) return { id, hasPin: false, idempotent: true };
+  await database.query('delete from pdv_operator_credentials where operator_id=$1', [id]);
+  await writeAdminAudit(req, 'PIN_REMOVED', 'operator', id, { role: previous.role }, null);
+  return { id, hasPin: false };
 });
 
 app.get('/integrations/status', async (req) => {
@@ -250,7 +346,10 @@ app.get('/integrations/status', async (req) => {
   }
   return integrationStatusPromise;
 });
-app.get('/integrations/bling/connect', async (_req, reply) => {
+// Só gerente ou administrador inicia a conexão: o estado OAuth só é emitido para
+// uma sessão autenticada, então ninguém de fora consegue trocar a conta Bling da loja.
+app.post('/integrations/bling/connect', async (req) => {
+  requireAdminOrManager(req);
   const clientId = process.env.BLING_CLIENT_ID;
   const redirectUri = process.env.BLING_REDIRECT_URI;
   if (!clientId || !process.env.BLING_CLIENT_SECRET || !redirectUri) {
@@ -262,7 +361,8 @@ app.get('/integrations/bling/connect', async (_req, reply) => {
   authorizeUrl.searchParams.set('client_id', clientId);
   authorizeUrl.searchParams.set('state', state);
   authorizeUrl.searchParams.set('redirect_uri', redirectUri);
-  return reply.redirect(authorizeUrl.toString());
+  await writeAdminAudit(req, 'BLING_CONNECT_STARTED', 'integration', 'bling', null, null);
+  return { url: authorizeUrl.toString() };
 });
 app.get('/integrations/bling/callback', async (req, reply) => {
   const query = req.query as { code?: string; state?: string; error?: string };

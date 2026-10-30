@@ -169,6 +169,18 @@ export const initializeDatabase = async () => {
   await pool.query(`create index if not exists bling_webhook_events_pending_idx
     on bling_webhook_events (status, next_attempt_at, received_at)
     where status in ('PENDING','PROCESSING','FAILED','DEAD')`);
+  await pool.query(`create table if not exists pdv_operator_credentials (
+    operator_id text primary key,
+    pin_hash text not null,
+    role text not null check (role in ('OPERATOR','MANAGER')),
+    updated_by text not null,
+    updated_at timestamptz not null default now()
+  )`);
+  await pool.query(`create table if not exists pdv_revoked_tokens (
+    jti text primary key,
+    expires_at timestamptz not null
+  )`);
+  await pool.query('delete from pdv_revoked_tokens where expires_at < now()');
   await pool.query('delete from oauth_states where expires_at < now()');
 };
 
