@@ -8,7 +8,7 @@ import {
   exchangeBlingAuthorizationCode,
   getBlingConnectionStatus
 } from './integrations/credentials.js';
-import { initializeDatabase, pool } from './db.js';
+import { initializeDatabase, pool, withTransaction } from './db.js';
 import { money, type Customer, type PaymentSplit, type Sale, type SaleItem } from './domain.js';
 import { getWebhookHealth, registerBlingWebhooks } from './webhooks.js';
 import { authConfigured, authenticatePin, issueToken, principalFromRequest, verifyToken } from './auth.js';
@@ -488,11 +488,9 @@ app.post('/admin/cash/sessions/open', async (req) => {
   if(!account||!channel||!seller)return badRequest('Operador, conta ou loja inválidos/inativos no Bling');
   const businessUnitId=body.businessUnitId??channel.businessUnitId;
   if(channel.id!=='DEFAULT'&&!businessUnitId)return badRequest('A loja não possui unidade de negócio vinculada');
-  const database=requireDatabase(),id=randomUUID(),amount=money(Math.max(0,Number(body.openingAmount)||0));
-  await database.query('begin');
-  try{await database.query(`insert into pdv_cash_sessions(id,operator_id,seller_id,account_id,account_name,channel_id,channel_name,business_unit_id,business_unit_name,status,opening_amount) values($1,$2,$2,$3,$4,$5,$6,$7,$8,'OPEN',$9)`,[id,seller.id,account.id,account.name,channel.id,channel.name,businessUnitId??null,channel.businessUnitName??null,amount]);
-    await database.query(`insert into pdv_cash_operations(id,session_id,operation_type,amount,data) values($1,$2,'OPENING',$3,$4::jsonb)`,[randomUUID(),id,amount,JSON.stringify({controlOnly:true,syncStatus:'NOT_REQUIRED',source:'ADMIN'})]);
-    await database.query('commit');}catch(error){await database.query('rollback');throw error;}
+  const id=randomUUID(),amount=money(Math.max(0,Number(body.openingAmount)||0));
+  await withTransaction(async client=>{await client.query(`insert into pdv_cash_sessions(id,operator_id,seller_id,account_id,account_name,channel_id,channel_name,business_unit_id,business_unit_name,status,opening_amount) values($1,$2,$2,$3,$4,$5,$6,$7,$8,'OPEN',$9)`,[id,seller.id,account.id,account.name,channel.id,channel.name,businessUnitId??null,channel.businessUnitName??null,amount]);
+    await client.query(`insert into pdv_cash_operations(id,session_id,operation_type,amount,data) values($1,$2,'OPENING',$3,$4::jsonb)`,[randomUUID(),id,amount,JSON.stringify({controlOnly:true,syncStatus:'NOT_REQUIRED',source:'ADMIN'})]);});
   const session=await cashSessionById(id);await writeAdminAudit(req,'OPEN','cash_session',id,null,{session,openedBy:principal?.operatorName});return {session};
 });
 
@@ -515,31 +513,32 @@ app.post('/admin/cash/sessions/:id/reopen', async (req) => {
   if(await currentCashSession(session.operatorId))return conflict('O operador já possui outro caixa aberto');
   const version=await database.query('select coalesce(max(version),1)::int version from pdv_cash_closing_versions where session_id=$1',[id]) as {rows:any[]};
   const closingVersion=version.rows[0]?.version??1;
-  await database.query('begin');try{
-    await database.query(`insert into pdv_cash_reopenings(id,session_id,closing_version,justification,reopened_by,previous_summary) values($1,$2,$3,$4,$5,$6::jsonb)`,[randomUUID(),id,closingVersion,justification,principal?.operatorName??principal?.operatorId,JSON.stringify(session.closingSummary??{})]);
-    await database.query(`update pdv_cash_sessions set status='OPEN',closed_at=null,closing_summary=null where id=$1 and status='CLOSED'`,[id]);
-    await database.query(`insert into pdv_cash_operations(id,session_id,operation_type,amount,data) values($1,$2,'REOPENING',0,$3::jsonb)`,[randomUUID(),id,JSON.stringify({controlOnly:true,source:'ADMIN',justification,actor:principal?.operatorName})]);
-    await database.query('commit');
-  }catch(error){await database.query('rollback');throw error;}
+  await withTransaction(async client=>{
+    await client.query(`insert into pdv_cash_reopenings(id,session_id,closing_version,justification,reopened_by,previous_summary) values($1,$2,$3,$4,$5,$6::jsonb)`,[randomUUID(),id,closingVersion,justification,principal?.operatorName??principal?.operatorId,JSON.stringify(session.closingSummary??{})]);
+    const reopened=await client.query(`update pdv_cash_sessions set status='OPEN',closed_at=null,closing_summary=null where id=$1 and status='CLOSED' returning id`,[id]) as {rows:unknown[]};
+    if(!reopened.rows[0])return conflict('Caixa foi alterado por outro usuário');
+    await client.query(`insert into pdv_cash_operations(id,session_id,operation_type,amount,data) values($1,$2,'REOPENING',0,$3::jsonb)`,[randomUUID(),id,JSON.stringify({controlOnly:true,source:'ADMIN',justification,actor:principal?.operatorName})]);
+  });
   const updated=await cashSessionById(id);await writeAdminAudit(req,'REOPEN','cash_session',id,{status:'CLOSED',closingSummary:session.closingSummary},{status:'OPEN',justification,closingVersion});return {session:updated,closingVersion};
 });
 
 app.post('/admin/cash/sessions/:id/close', async (req) => {
   const principal=requireAdminOrManager(req),id=(req.params as {id:string}).id,body=req.body as {countedValues?:{name:string;amount:number}[];notes?:string};
-  const database=requireDatabase(),snapshot=await cashSessionSnapshot(id);if(snapshot.session.status!=='OPEN')return conflict('Caixa não está aberto');
+  const snapshot=await cashSessionSnapshot(id);if(snapshot.session.status!=='OPEN')return conflict('Caixa não está aberto');
   if(principal?.role==='OPERATOR'&&snapshot.session.operatorId!==principal.operatorId)throw Object.assign(new Error('Sem permissão para fechar este caixa'),{statusCode:403});
   const expected=new Map(snapshot.paymentTotals.map(item=>[item.name,item.amount]));const cashName=[...expected.keys()].find(name=>/dinheiro|cash/i.test(name))??'Dinheiro';expected.set(cashName,snapshot.expectedCash);
   const countedValues=body.countedValues?.length?body.countedValues:[...expected].map(([name,amount])=>({name,amount}));
   const counted=new Map(countedValues.map(item=>[item.name,money(Number(item.amount)||0)]));
   const reconciliation=[...new Set([...expected.keys(),...counted.keys()])].map(name=>({name,expected:money(expected.get(name)??0),counted:money(counted.get(name)??0),difference:money((counted.get(name)??0)-(expected.get(name)??0))}));
   const summary={closedAt:new Date().toISOString(),countedValues,reconciliation,totalDifference:money(reconciliation.reduce((sum,item)=>sum+item.difference,0)),expectedCash:snapshot.expectedCash,notes:body.notes?.trim()||undefined,closedBy:principal?.operatorName};
-  await database.query('begin');try{
-    const versionResult=await database.query('select coalesce(max(version),0)::int version from pdv_cash_closing_versions where session_id=$1',[id]) as {rows:any[]};const version=(versionResult.rows[0]?.version??0)+1;
-    const update=await database.query(`update pdv_cash_sessions set status='CLOSED',closed_at=now(),closing_summary=$2::jsonb where id=$1 and status='OPEN' returning closed_at`,[id,JSON.stringify(summary)]) as {rows:any[]};if(!update.rows[0])throw conflict('Caixa foi alterado por outro usuário');
-    await database.query(`insert into pdv_cash_closing_versions(id,session_id,version,closing_summary,closed_at,closed_by) values($1,$2,$3,$4::jsonb,$5,$6)`,[randomUUID(),id,version,JSON.stringify(summary),update.rows[0].closed_at,principal?.operatorName??principal?.operatorId]);
-    await database.query(`insert into pdv_cash_operations(id,session_id,operation_type,amount,data) values($1,$2,'CLOSING',0,$3::jsonb)`,[randomUUID(),id,JSON.stringify({controlOnly:true,source:'ADMIN',version,summary})]);await database.query('commit');
-    await writeAdminAudit(req,'CLOSE','cash_session',id,{status:'OPEN'},{status:'CLOSED',version,summary});return {closed:true,version,summary};
-  }catch(error){await database.query('rollback');throw error;}
+  const version=await withTransaction(async client=>{
+    const update=await client.query(`update pdv_cash_sessions set status='CLOSED',closed_at=now(),closing_summary=$2::jsonb where id=$1 and status='OPEN' returning closed_at`,[id,JSON.stringify(summary)]) as {rows:any[]};if(!update.rows[0])return conflict('Caixa foi alterado por outro usuário');
+    const versionResult=await client.query('select coalesce(max(version),0)::int version from pdv_cash_closing_versions where session_id=$1',[id]) as {rows:any[]};const version=(versionResult.rows[0]?.version??0)+1;
+    await client.query(`insert into pdv_cash_closing_versions(id,session_id,version,closing_summary,closed_at,closed_by) values($1,$2,$3,$4::jsonb,$5,$6)`,[randomUUID(),id,version,JSON.stringify(summary),update.rows[0].closed_at,principal?.operatorName??principal?.operatorId]);
+    await client.query(`insert into pdv_cash_operations(id,session_id,operation_type,amount,data) values($1,$2,'CLOSING',0,$3::jsonb)`,[randomUUID(),id,JSON.stringify({controlOnly:true,source:'ADMIN',version,summary})]);
+    return version;
+  });
+  await writeAdminAudit(req,'CLOSE','cash_session',id,{status:'OPEN'},{status:'CLOSED',version,summary});return {closed:true,version,summary};
 });
 
 app.get('/admin/audit', async (req) => {
@@ -677,20 +676,21 @@ app.post('/cash/sessions/open', async (req) => {
   const businessUnitName = useDefaultRouting ? 'Configuração padrão' : channel.businessUnitName ?? 'Unidade do Bling';
   const openingAmount = money(Math.max(0, Number(body.openingAmount) || 0));
   const sessionId = randomUUID();
-  const database = requireDatabase();
   const operationId = randomUUID();
-  await database.query(
-    `insert into pdv_cash_sessions (id, operator_id, seller_id, account_id, account_name, channel_id, channel_name,
-       business_unit_id, business_unit_name, status, opening_amount)
-     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,'OPEN',$10)`,
-    [sessionId, operatorId, body.sellerId ?? operatorId, account.id, account.name, channel.id, channel.name,
-      businessUnitId, businessUnitName, openingAmount]
-  );
-  await database.query(
-    `insert into pdv_cash_operations (id, session_id, operation_type, amount, data)
-     values ($1,$2,'OPENING',$3,$4::jsonb)`,
-    [operationId, sessionId, openingAmount, JSON.stringify({ account, syncStatus: 'NOT_REQUIRED', controlOnly: true })]
-  );
+  await withTransaction(async client => {
+    await client.query(
+      `insert into pdv_cash_sessions (id, operator_id, seller_id, account_id, account_name, channel_id, channel_name,
+         business_unit_id, business_unit_name, status, opening_amount)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,'OPEN',$10)`,
+      [sessionId, operatorId, body.sellerId ?? operatorId, account.id, account.name, channel.id, channel.name,
+        businessUnitId, businessUnitName, openingAmount]
+    );
+    await client.query(
+      `insert into pdv_cash_operations (id, session_id, operation_type, amount, data)
+       values ($1,$2,'OPENING',$3,$4::jsonb)`,
+      [operationId, sessionId, openingAmount, JSON.stringify({ account, syncStatus: 'NOT_REQUIRED', controlOnly: true })]
+    );
+  });
   return { session: await currentCashSession(operatorId), openingSyncStatus: 'NOT_REQUIRED', controlOnly: true };
 });
 app.post('/cash/entries', async (req) => {
@@ -785,19 +785,16 @@ app.post('/cash/sessions/:id/reopen', async (req) => {
   if (!session) return badRequest('Caixa não encontrado');
   if (session.status === 'OPEN') return { reopened: true, session, idempotent: true };
   if (await currentCashSession(session.operatorId)) return badRequest('O operador já possui outro caixa aberto');
-  await database.query('begin');
-  try {
-    await database.query(`update pdv_cash_sessions set status='OPEN', closed_at=null, closing_summary=null where id=$1`, [id]);
-    await database.query(
+  await withTransaction(async client => {
+    const reopened = await client.query(`update pdv_cash_sessions set status='OPEN', closed_at=null, closing_summary=null where id=$1 and status='CLOSED' returning id`, [id]) as { rows: unknown[] };
+    if (!reopened.rows[0]) return conflict('Caixa foi alterado por outro usuário');
+    await client.query(
       `insert into pdv_cash_operations (id, session_id, operation_type, amount, data)
        values ($1,$2,'REOPENING',0,$3::jsonb)`,
       [randomUUID(), id, JSON.stringify({ syncStatus: 'NOT_REQUIRED', controlOnly: true })]
     );
-    await database.query('commit');
-  } catch (error) {
-    await database.query('rollback');
-    throw error;
-  }
+  });
+  await writeAdminAudit(req, 'REOPEN', 'cash_session', id, { status: 'CLOSED', closingSummary: session.closingSummary }, { status: 'OPEN', source: 'PDV' });
   return { reopened: true, session: await cashSessionById(id) };
 });
 app.delete('/cash/sessions/:id', async (req, reply) => {
@@ -813,15 +810,11 @@ app.delete('/cash/sessions/:id', async (req, reply) => {
   if ((salesResult.rows[0]?.count ?? 0) > 0 || (movementResult.rows[0]?.count ?? 0) > 0) {
     return reply.code(409).send({ message: 'Este caixa possui vendas, sangrias ou suprimentos. Exclua apenas aberturas de teste sem movimento.' });
   }
-  await database.query('begin');
-  try {
-    await database.query('delete from pdv_cash_operations where session_id=$1', [id]);
-    await database.query('delete from pdv_cash_sessions where id=$1', [id]);
-    await database.query('commit');
-  } catch (error) {
-    await database.query('rollback');
-    throw error;
-  }
+  await withTransaction(async client => {
+    await client.query('delete from pdv_cash_operations where session_id=$1', [id]);
+    await client.query('delete from pdv_cash_sessions where id=$1', [id]);
+  });
+  await writeAdminAudit(req, 'DELETE', 'cash_session', id, { session }, null);
   return { deleted: true, sessionId: id };
 });
 app.post('/cash/sessions/:id/close', async (req) => {
@@ -856,22 +849,25 @@ app.post('/cash/sessions/:id/close', async (req) => {
     notes: body.notes?.trim() || undefined,
     blingEntries: entries
   };
-  await database.query('begin');
-  try {
-    await database.query(
-      `update pdv_cash_sessions set status='CLOSED', closed_at=now(), closing_summary=$2::jsonb where id=$1 and status='OPEN'`,
+  await withTransaction(async client => {
+    const closed = await client.query(
+      `update pdv_cash_sessions set status='CLOSED', closed_at=now(), closing_summary=$2::jsonb where id=$1 and status='OPEN' returning closed_at`,
       [id, JSON.stringify(summary)]
+    ) as { rows: { closed_at: Date }[] };
+    if (!closed.rows[0]) return conflict('Caixa foi alterado por outro usuário');
+    const versionResult = await client.query('select coalesce(max(version),0)::int version from pdv_cash_closing_versions where session_id=$1', [id]) as { rows: { version: number }[] };
+    const version = (versionResult.rows[0]?.version ?? 0) + 1;
+    await client.query(
+      `insert into pdv_cash_closing_versions (id, session_id, version, closing_summary, closed_at, closed_by) values ($1,$2,$3,$4::jsonb,$5,$6)`,
+      [randomUUID(), id, version, JSON.stringify(summary), closed.rows[0].closed_at, principalFromRequest(req)?.operatorName ?? snapshot.session.operatorId]
     );
-    await database.query(
+    await client.query(
       `insert into pdv_cash_operations (id, session_id, operation_type, amount, data)
        values ($1,$2,'CLOSING',0,$3::jsonb)`,
       [randomUUID(), id, JSON.stringify({ syncStatus: 'NOT_REQUIRED', summary })]
     );
-    await database.query('commit');
-  } catch (error) {
-    await database.query('rollback');
-    throw error;
-  }
+  });
+  await writeAdminAudit(req, 'CLOSE', 'cash_session', id, { status: 'OPEN' }, { status: 'CLOSED', summary, source: 'PDV' });
   return { closed: true, sessionId: id, summary };
 });
 

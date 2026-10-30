@@ -9,6 +9,26 @@ export const pool = process.env.DATABASE_URL
     })
   : undefined;
 
+export type DatabaseClient = { query: (text: string, values?: unknown[]) => Promise<unknown> };
+
+// BEGIN/COMMIT precisam rodar na mesma conexão; pool.query pode usar uma conexão
+// diferente a cada chamada e deixar transações abertas ou gravadas pela metade.
+export const withTransaction = async <T>(work: (client: DatabaseClient) => Promise<T>): Promise<T> => {
+  if (!pool) throw Object.assign(new Error('Banco de dados do PDV indisponível'), { statusCode: 503 });
+  const client = await pool.connect();
+  try {
+    await client.query('begin');
+    const result = await work(client);
+    await client.query('commit');
+    return result;
+  } catch (error) {
+    await client.query('rollback').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+};
+
 export const initializeDatabase = async () => {
   if (!pool) return;
   await pool.query(`create table if not exists pdv_sales (
