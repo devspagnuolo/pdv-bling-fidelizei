@@ -2,10 +2,11 @@ services:
   - type: web
     name: pdv-bling-fidelizei-api
     runtime: node
-    plan: free
-    buildCommand: npm install && npm run build -w @pdv/api
+    plan: starter
+    buildCommand: npm ci && npm run build -w @pdv/api
     startCommand: npm start -w @pdv/api
     healthCheckPath: /health
+    autoDeployTrigger: checksPass
     envVars:
       - key: NODE_ENV
         value: production
@@ -25,11 +26,29 @@ services:
         value: https://api.fidelizaplus.com.br/public/v1
       - key: FIDELIZEI_API_KEY
         sync: false
+      - key: PDV_WEB_URL
+        sync: false
+      - key: PDV_AUTH_SECRET
+        generateValue: true
+      - key: PDV_OPERATOR_PIN
+        sync: false
+      - key: PDV_MANAGER_PIN
+        sync: false
+      - key: PDV_ADMIN_PIN
+        sync: false
+      - key: PDV_REQUIRE_INDIVIDUAL_PIN
+        sync: false
+      - key: BLING_COMPANY_ID
+        sync: false
+      - key: BLING_COMPANY_CNPJ
+        sync: false
+      - key: BLING_FINAL_CONSUMER_CONTACT_ID
+        sync: false
 
   - type: web
     name: pdv-bling-fidelizei-web
     runtime: static
-    buildCommand: npm install && npm run build -w @pdv/web
+    buildCommand: npm ci && npm run build -w @pdv/web
     staticPublishPath: apps/web/dist
     envVars:
       - key: VITE_API_URL
@@ -37,4 +56,4 @@ services:
 
 databases:
   - name: pdv-bling-fidelizei-db
-    plan: free
+    plan: basic-256mb

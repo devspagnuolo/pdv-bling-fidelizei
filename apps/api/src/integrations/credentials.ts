@@ -92,6 +92,20 @@ const saveBlingTokens = async (tokens: BlingTokenResponse) => {
   return expiresAt;
 };
 
+// Com BLING_COMPANY_CNPJ configurado, só aceita a autorização feita pela empresa da
+// loja. Impede que outra conta Bling substitua a conexão usada nos pedidos e NFC-e.
+const assertExpectedCompany = async (accessToken: string) => {
+  const expected = process.env.BLING_COMPANY_CNPJ?.replace(/\D/g, '');
+  if (!expected) return;
+  const response = await fetch('https://api.bling.com.br/Api/v3/empresas/me/dados-basicos', {
+    headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json', 'enable-jwt': '1' },
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)
+  });
+  if (!response.ok) throw new Error(`Não foi possível confirmar a empresa autorizada no Bling (HTTP ${response.status}); a conexão anterior foi mantida`);
+  const body = await response.json().catch(() => ({})) as { data?: { cnpj?: string } };
+  const actual = String(body.data?.cnpj ?? '').replace(/\D/g, '');
+  if (actual !== expected) throw new Error('A conta Bling autorizada não é a empresa da loja; a conexão anterior foi mantida');
+};
 export const exchangeBlingAuthorizationCode = async (code: string) => {
   const redirectUri = process.env.BLING_REDIRECT_URI;
   if (!redirectUri) throw new Error('URL de retorno do aplicativo Bling não configurada');
@@ -100,6 +114,7 @@ export const exchangeBlingAuthorizationCode = async (code: string) => {
     code,
     redirect_uri: redirectUri
   }));
+  await assertExpectedCompany(tokens.access_token);
   const expiresAt = await saveBlingTokens(tokens);
   return { expiresAt };
 };

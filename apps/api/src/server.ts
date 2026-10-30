@@ -8,12 +8,16 @@ import {
   exchangeBlingAuthorizationCode,
   getBlingConnectionStatus
 } from './integrations/credentials.js';
-import { initializeDatabase, pool } from './db.js';
+import { initializeDatabase, pool, withTransaction } from './db.js';
 import { money, type Customer, type PaymentSplit, type Sale, type SaleItem } from './domain.js';
 import { getWebhookHealth, registerBlingWebhooks } from './webhooks.js';
-import { authConfigured, authenticatePin, issueToken, principalFromRequest, verifyToken } from './auth.js';
+import { authConfigured, authenticatePin, authRequired, bearerToken, hashPin, individualPinRequired, issueToken, principalFromRequest, validPinFormat, verifyPinHash, verifyToken, type AuthPrincipal } from './auth.js';
+import { AttemptLimiter } from './limiter.js';
+import { canAccessOperatorResource, isSupervisor, reversalRequiresSupervisor } from './access.js';
 
-const app = Fastify({ logger: true });
+// O Render entrega as requisições por um proxy; sem trustProxy, req.ip é o IP interno
+// do proxy e o limite de tentativas de login e a auditoria perdem o IP real da loja.
+const app = Fastify({ logger: true, trustProxy: true });
 app.removeContentTypeParser('application/json');
 app.addContentTypeParser('application/json', { parseAs: 'buffer' }, (req, body, done) => {
   try {
@@ -33,30 +37,55 @@ await app.register(cors, {
   methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['authorization', 'content-type']
 });
-const loginAttempts = new Map<string, { count: number; resetAt: number }>();
+const ipLoginLimiter = new AttemptLimiter(20, 15 * 60_000);
+const operatorLoginLimiter = new AttemptLimiter(5, 15 * 60_000);
+const adminPinLimiter = new AttemptLimiter(10, 15 * 60_000);
+const isTokenRevoked = async (principal: AuthPrincipal) => {
+  if (!pool || !principal.jti) return false;
+  const result = await pool.query('select 1 from pdv_revoked_tokens where jti=$1', [principal.jti]) as { rows: unknown[] };
+  return result.rows.length > 0;
+};
 app.addHook('preHandler', async (req, reply) => {
   const path = req.url.split('?')[0];
   const protectedRoute = path.startsWith('/sales') || path.startsWith('/customers') ||
     path.startsWith('/cash') || path.startsWith('/operations') ||
     (path.startsWith('/admin') && path !== '/admin/login') ||
-    (path === '/catalog/products/sync');
+    path === '/catalog/products/sync' || path === '/integrations/bling/connect' || path === '/auth/logout';
   if (!protectedRoute) return;
   if (!authConfigured()) {
-    if (path.startsWith('/operations')) return reply.code(503).send({ message: 'Configure a autenticação do PDV antes de acessar dados operacionais' });
+    if (authRequired() || path.startsWith('/operations')) return reply.code(503).send({ message: 'Configure a autenticação do PDV antes de acessar dados operacionais' });
     return;
   }
-  const authorization = req.headers.authorization;
-  const token = authorization?.startsWith('Bearer ') ? authorization.slice(7) : undefined;
-  const principal = verifyToken(token);
-  if (!principal) return reply.code(401).send({ message: 'Sessão expirada ou acesso não autorizado' });
+  const principal = verifyToken(bearerToken(req));
+  if (!principal || await isTokenRevoked(principal)) return reply.code(401).send({ message: 'Sessão expirada ou acesso não autorizado' });
   (req as typeof req & { auth?: typeof principal }).auth = principal;
+});
+app.setErrorHandler((error: Error & { statusCode?: number; code?: string }, req, reply) => {
+  const statusCode = error.statusCode && error.statusCode >= 400 ? error.statusCode : 500;
+  if (statusCode >= 500) req.log.error({ err: error }, 'Falha ao processar a requisição');
+  // Erros do banco podem trazer nomes de tabelas e trechos de SQL; não vão para a tela.
+  const fromDatabase = typeof error.code === 'string' && /^[0-9A-Z]{5}$/.test(error.code) && !error.statusCode;
+  const message = fromDatabase
+    ? `Falha interna ao gravar ou consultar dados do PDV (ref. ${req.id})`
+    : (error.message || 'Falha inesperada').slice(0, 1000);
+  return reply.code(statusCode).send({ statusCode, message });
 });
 const requireManager = (req: Parameters<typeof principalFromRequest>[0]) => {
   const principal = principalFromRequest(req);
-  if (authConfigured() && principal?.role !== 'MANAGER') {
+  if (authConfigured() && !isSupervisor(principal)) {
     throw Object.assign(new Error('Esta operação exige perfil de gerente'), { statusCode: 403 });
   }
   return principal;
+};
+const assertOwner = (req: Parameters<typeof principalFromRequest>[0], ownerId: string | undefined, message: string) => {
+  if (!canAccessOperatorResource(authConfigured(), principalFromRequest(req), ownerId)) {
+    throw Object.assign(new Error(message), { statusCode: 403 });
+  }
+};
+// Filtro SQL para listas do PDV: operador vê apenas as próprias vendas.
+const ownSalesFilter = (req: Parameters<typeof principalFromRequest>[0]) => {
+  const principal = principalFromRequest(req);
+  return authConfigured() && principal && !isSupervisor(principal) ? principal.operatorId : '';
 };
 const requireAdmin = (req: Parameters<typeof principalFromRequest>[0]) => {
   const principal = principalFromRequest(req);
@@ -77,6 +106,13 @@ const requireAdminViewer = (req: Parameters<typeof principalFromRequest>[0]) => 
   return principal;
 };
 const sales = new Map<string, Sale>();
+// Cache limitado às vendas mais recentes; o banco continua sendo a fonte de verdade.
+const SALES_CACHE_LIMIT = 500;
+const cacheSale = (sale: Sale) => {
+  sales.delete(sale.id);
+  sales.set(sale.id, sale);
+  if (pool && sales.size > SALES_CACHE_LIMIT) sales.delete(sales.keys().next().value!);
+};
 const badRequest = (message: string): never => { throw Object.assign(new Error(message), { statusCode: 400 }); };
 const conflict = (message: string): never => { throw Object.assign(new Error(message), { statusCode: 409 }); };
 const calculate = (items: SaleItem[], discount = 0, freight = 0) => {
@@ -113,7 +149,7 @@ registerBlingWebhooks(app);
 void bling.syncProducts().catch(error => app.log.error(error, 'Falha na sincronização inicial do catálogo Bling'));
 setInterval(() => void bling.syncProducts().catch(error => app.log.error(error, 'Falha na sincronização periódica do catálogo Bling')), 15 * 60_000).unref();
 const persist = async (sale: Sale) => {
-  sales.set(sale.id, sale);
+  cacheSale(sale);
   if (pool) await pool.query(
     `insert into pdv_sales (id, status, data) values ($1, $2, $3::jsonb)
      on conflict (id) do update set status = excluded.status, data = excluded.data, updated_at = now()`,
@@ -126,8 +162,26 @@ const getSale = async (id: string) => {
   if (!pool) return undefined;
   const result = await pool.query('select data from pdv_sales where id = $1', [id]) as { rows: { data: Sale }[] };
   const sale = result.rows[0]?.data;
-  if (sale) sales.set(sale.id, sale);
+  if (sale) cacheSale(sale);
   return sale;
+};
+// Serializa operações que mudam o estado de uma venda (cupom, cancelamento, exclusão)
+// e relê a venda do banco dentro da trava, evitando estorno em dobro.
+const withSaleLock = async <T>(id: string, work: (sale: Sale | undefined) => Promise<T>) => {
+  if (!pool) return work(await getSale(id));
+  const client = await pool.connect();
+  let locked = false;
+  try {
+    await client.query('select pg_advisory_lock(hashtext($1))', [id]);
+    locked = true;
+    const result = await client.query('select data from pdv_sales where id = $1', [id]) as { rows: { data: Sale }[] };
+    const sale = result.rows[0]?.data;
+    if (sale) cacheSale(sale);
+    return await work(sale);
+  } finally {
+    if (locked) await client.query('select pg_advisory_unlock(hashtext($1))', [id]).catch(() => undefined);
+    client.release();
+  }
 };
 app.get('/', async () => ({ ok: true, service: 'pdv-bling-fidelizei-api' }));
 app.get('/health', async (_req, reply) => {
@@ -164,45 +218,123 @@ app.get('/health', async (_req, reply) => {
 let integrationStatusCache: { expires: number; value: unknown } | undefined;
 let integrationStatusPromise: Promise<unknown> | undefined;
 app.get('/auth/status', async () => ({ enabled: authConfigured() }));
+const operatorCredential = async (operatorId: string) => {
+  if (!pool) return undefined;
+  const result = await pool.query('select pin_hash as "pinHash", role from pdv_operator_credentials where operator_id=$1', [operatorId]) as { rows: { pinHash: string; role: 'OPERATOR' | 'MANAGER' }[] };
+  return result.rows[0];
+};
+// PIN individual tem prioridade. Sem PIN individual cadastrado, o PIN compartilhado
+// segue válido até PDV_REQUIRE_INDIVIDUAL_PIN=1 (período de transição).
+const authenticateOperator = async (operatorId: string, pin: string): Promise<AuthPrincipal['role'] | undefined> => {
+  const credential = await operatorCredential(operatorId);
+  if (credential) return verifyPinHash(pin, credential.pinHash) ? credential.role : undefined;
+  const role = authenticatePin(pin);
+  return role === 'ADMIN' ? undefined : role;
+};
+const loginBlocked = (req: { ip: string }, operatorKey: string) =>
+  ipLoginLimiter.blocked(`ip:${req.ip}`) || operatorLoginLimiter.blocked(operatorKey);
+const registerLoginFailure = (req: { ip: string; log: { warn: (data: unknown, message: string) => void } }, operatorKey: string) => {
+  ipLoginLimiter.fail(`ip:${req.ip}`);
+  operatorLoginLimiter.fail(operatorKey);
+  req.log.warn({ ip: req.ip, operatorKey }, 'Tentativa de login recusada');
+};
 app.post('/auth/login', async (req, reply) => {
   if (!authConfigured()) return reply.code(503).send({ message: 'Autenticação do PDV ainda não configurada no servidor' });
-  const address = req.ip;
-  const current = loginAttempts.get(address);
-  if (current && current.resetAt > Date.now() && current.count >= 5) {
-    return reply.code(429).send({ message: 'Muitas tentativas. Aguarde cinco minutos' });
-  }
-  const body = req.body as { operatorId?: string; pin?: string };
-  const role = authenticatePin(String(body.pin ?? ''));
-  const seller = body.operatorId ? (await bling.sellers()).find(item => item.id === body.operatorId && item.active) : undefined;
+  const body = (req.body ?? {}) as { operatorId?: string; pin?: string };
+  const operatorId = String(body.operatorId ?? '');
+  const operatorKey = `op:${operatorId}`;
+  if (loginBlocked(req, operatorKey)) return reply.code(429).send({ message: 'Muitas tentativas. Aguarde 15 minutos ou procure a gerência' });
+  const seller = operatorId ? (await bling.sellers()).find(item => item.id === operatorId && item.active) : undefined;
+  const pin = String(body.pin ?? '');
+  const role = seller ? await authenticateOperator(seller.id, pin) ?? (authenticatePin(pin) === 'ADMIN' ? 'ADMIN' : undefined) : undefined;
   if (!role || !seller) {
-    const resetAt = current?.resetAt && current.resetAt > Date.now() ? current.resetAt : Date.now() + 5 * 60_000;
-    loginAttempts.set(address, { count: (current?.resetAt && current.resetAt > Date.now() ? current.count : 0) + 1, resetAt });
+    registerLoginFailure(req, operatorKey);
     return reply.code(401).send({ message: 'Operador ou PIN inválido' });
   }
-  loginAttempts.delete(address);
+  operatorLoginLimiter.reset(operatorKey);
   const principal = { operatorId: seller.id, operatorName: seller.name, role };
   return { token: issueToken(principal), principal };
 });
 app.post('/admin/login', async (req, reply) => {
   if (!authConfigured()) return reply.code(503).send({ message: 'Autenticação do PDV ainda não configurada no servidor.' });
-  const address = req.ip;
-  const current = loginAttempts.get(address);
-  if (current && current.resetAt > Date.now() && current.count >= 5) return reply.code(429).send({ message: 'Muitas tentativas. Aguarde cinco minutos' });
-  const body = req.body as { pin?: string; operatorId?: string };
-  const role=authenticatePin(String(body.pin ?? ''));
-  if (!role) {
-    const resetAt = current?.resetAt && current.resetAt > Date.now() ? current.resetAt : Date.now() + 5 * 60_000;
-    loginAttempts.set(address, { count: (current?.resetAt && current.resetAt > Date.now() ? current.count : 0) + 1, resetAt });
-    return reply.code(401).send({ message: 'PIN administrativo inválido' });
+  const body = (req.body ?? {}) as { pin?: string; operatorId?: string };
+  const pin = String(body.pin ?? '');
+  const operatorKey = body.operatorId ? `op:${body.operatorId}` : 'admin';
+  const limiter = body.operatorId ? operatorLoginLimiter : adminPinLimiter;
+  if (ipLoginLimiter.blocked(`ip:${req.ip}`) || limiter.blocked(operatorKey)) return reply.code(429).send({ message: 'Muitas tentativas. Aguarde 15 minutos' });
+  const fail = (message: string) => {
+    ipLoginLimiter.fail(`ip:${req.ip}`);
+    limiter.fail(operatorKey);
+    req.log.warn({ ip: req.ip, operatorKey }, 'Tentativa de login administrativo recusada');
+    return reply.code(401).send({ message });
+  };
+  if (authenticatePin(pin) === 'ADMIN') {
+    adminPinLimiter.reset('admin');
+    const principal = { operatorId: 'admin', operatorName: process.env.PDV_ADMIN_NAME || 'Administrador', role: 'ADMIN' as const };
+    return { token: issueToken(principal), principal };
   }
-  if(role!=='ADMIN'&&!body.operatorId)return reply.code(400).send({message:'Selecione seu usuário para registrar as consultas.'});
-  const seller=role==='ADMIN'?undefined:(await bling.sellers()).find(item=>item.id===body.operatorId&&item.active);
-  if(role!=='ADMIN'&&!seller)return reply.code(401).send({message:'Usuário operacional inválido.'});
-  loginAttempts.delete(address);
-  const principal = role==='ADMIN'
-    ? { operatorId: 'admin', operatorName: process.env.PDV_ADMIN_NAME || 'Administrador', role: 'ADMIN' as const }
-    : { operatorId: seller!.id, operatorName: seller!.name, role };
+  if (!body.operatorId) return fail('Selecione seu usuário ou informe o PIN de administrador.');
+  const seller = (await bling.sellers()).find(item => item.id === body.operatorId && item.active);
+  const role = seller ? await authenticateOperator(seller.id, pin) : undefined;
+  if (!seller || !role) return fail('Usuário ou PIN inválido.');
+  operatorLoginLimiter.reset(operatorKey);
+  const principal = { operatorId: seller.id, operatorName: seller.name, role };
   return { token: issueToken(principal), principal };
+});
+app.post('/auth/logout', async (req) => {
+  const principal = principalFromRequest(req);
+  if (pool && principal?.jti) {
+    await pool.query('insert into pdv_revoked_tokens (jti, expires_at) values ($1, to_timestamp($2)) on conflict do nothing', [principal.jti, principal.exp]);
+  }
+  return { loggedOut: true };
+});
+// PINs individuais: somente o administrador cadastra, troca ou remove.
+app.get('/admin/operators/credentials', async (req) => {
+  requireAdmin(req);
+  const database = requireDatabase();
+  const [sellers, credentials] = await Promise.all([
+    bling.sellers(),
+    database.query('select operator_id as "operatorId", role, updated_by as "updatedBy", updated_at as "updatedAt" from pdv_operator_credentials') as Promise<{ rows: { operatorId: string; role: string; updatedBy: string; updatedAt: string }[] }>
+  ]);
+  const byOperator = new Map(credentials.rows.map(row => [row.operatorId, row]));
+  return {
+    individualPinRequired: individualPinRequired(),
+    operators: sellers.filter(seller => seller.active).map(seller => {
+      const credential = byOperator.get(seller.id);
+      return { id: seller.id, name: seller.name, hasPin: Boolean(credential), role: credential?.role, updatedBy: credential?.updatedBy, updatedAt: credential?.updatedAt };
+    })
+  };
+});
+app.put('/admin/operators/:id/credential', async (req) => {
+  const principal = requireAdmin(req);
+  const database = requireDatabase();
+  const id = (req.params as { id: string }).id;
+  const body = (req.body ?? {}) as { pin?: string; role?: string };
+  const pin = String(body.pin ?? '');
+  if (!validPinFormat(pin)) return badRequest('O PIN deve ter de 6 a 12 dígitos numéricos');
+  if (body.role !== 'OPERATOR' && body.role !== 'MANAGER') return badRequest('Selecione o perfil: operador ou gerente');
+  if (process.env.PDV_ADMIN_PIN && pin === process.env.PDV_ADMIN_PIN) return badRequest('Escolha um PIN diferente do PIN de administrador');
+  const seller = (await bling.sellers()).find(item => item.id === id && item.active);
+  if (!seller) return badRequest('Vendedor não encontrado ou inativo no Bling');
+  const previous = await operatorCredential(id);
+  await database.query(
+    `insert into pdv_operator_credentials (operator_id, pin_hash, role, updated_by, updated_at) values ($1,$2,$3,$4,now())
+     on conflict (operator_id) do update set pin_hash=excluded.pin_hash, role=excluded.role, updated_by=excluded.updated_by, updated_at=now()`,
+    [id, hashPin(pin), body.role, principal.operatorName]
+  );
+  operatorLoginLimiter.reset(`op:${id}`);
+  await writeAdminAudit(req, previous ? 'PIN_CHANGED' : 'PIN_CREATED', 'operator', id, previous ? { role: previous.role } : null, { role: body.role, operatorName: seller.name });
+  return { id, name: seller.name, hasPin: true, role: body.role };
+});
+app.delete('/admin/operators/:id/credential', async (req) => {
+  requireAdmin(req);
+  const database = requireDatabase();
+  const id = (req.params as { id: string }).id;
+  const previous = await operatorCredential(id);
+  if (!previous) return { id, hasPin: false, idempotent: true };
+  await database.query('delete from pdv_operator_credentials where operator_id=$1', [id]);
+  await writeAdminAudit(req, 'PIN_REMOVED', 'operator', id, { role: previous.role }, null);
+  return { id, hasPin: false };
 });
 
 app.get('/integrations/status', async (req) => {
@@ -221,7 +353,10 @@ app.get('/integrations/status', async (req) => {
   }
   return integrationStatusPromise;
 });
-app.get('/integrations/bling/connect', async (_req, reply) => {
+// Só gerente ou administrador inicia a conexão: o estado OAuth só é emitido para
+// uma sessão autenticada, então ninguém de fora consegue trocar a conta Bling da loja.
+app.post('/integrations/bling/connect', async (req) => {
+  requireAdminOrManager(req);
   const clientId = process.env.BLING_CLIENT_ID;
   const redirectUri = process.env.BLING_REDIRECT_URI;
   if (!clientId || !process.env.BLING_CLIENT_SECRET || !redirectUri) {
@@ -233,7 +368,8 @@ app.get('/integrations/bling/connect', async (_req, reply) => {
   authorizeUrl.searchParams.set('client_id', clientId);
   authorizeUrl.searchParams.set('state', state);
   authorizeUrl.searchParams.set('redirect_uri', redirectUri);
-  return reply.redirect(authorizeUrl.toString());
+  await writeAdminAudit(req, 'BLING_CONNECT_STARTED', 'integration', 'bling', null, null);
+  return { url: authorizeUrl.toString() };
 });
 app.get('/integrations/bling/callback', async (req, reply) => {
   const query = req.query as { code?: string; state?: string; error?: string };
@@ -427,19 +563,7 @@ app.get('/admin/sales/:id', async (req) => {
 
 app.post('/admin/sales/:id/cancel', async (req) => {
   requireAdmin(req);
-  const id = (req.params as {id:string}).id, sale = await getSale(id);
-  if (!sale) return badRequest('Pedido não encontrado');
-  if (sale.status==='CANCELLED') return sale;
-  if (sale.status==='DELETED') return badRequest('Pedido excluído não pode ser cancelado');
-  if (!sale.blingOrderId) return badRequest('Pedido sem vínculo com o Bling');
-  const before = { status:sale.status, total:sale.total, payments:sale.payments };
-  const result = sale.status==='OPEN' ? await bling.cancelDraftOrder(sale.blingOrderId) : await bling.cancelOrder(sale.blingOrderId);
-  let loyaltyWarning: string|undefined;
-  if (sale.fidelizeiTransactionId) try { await fidelizei.reverseSale(sale.id); } catch (error) { loyaltyWarning=error instanceof Error?error.message.slice(0,400):'Estorno Fidelizei pendente'; }
-  if (pool&&['COMPLETED','RECONCILIATION_REQUIRED'].includes(sale.status)) await pool.query(`update bling_products product set stock=product.stock+item.quantity from jsonb_to_recordset($1::jsonb) as item("productId" text,quantity numeric) where product.id=item."productId"`,[JSON.stringify(sale.items.map(item=>({productId:item.productId,quantity:item.quantity})))]);
-  sale.status='CANCELLED'; sale.cancelledAt=new Date().toISOString(); Object.assign(sale,{cancellationKind:'CANCELLED',lastError:loyaltyWarning});
-  await persist(sale); await writeAdminAudit(req,'CANCEL','sale',sale.id,before,{status:sale.status,total:sale.total,operatorId:sale.operatorId});
-  return {...sale,cancelledInBling:true,loyaltyWarning,blingWarnings:result.warnings};
+  return reverseSaleOrder(req, 'CANCEL', 'ADMIN');
 });
 
 app.get('/admin/finance', async (req) => {
@@ -488,11 +612,9 @@ app.post('/admin/cash/sessions/open', async (req) => {
   if(!account||!channel||!seller)return badRequest('Operador, conta ou loja inválidos/inativos no Bling');
   const businessUnitId=body.businessUnitId??channel.businessUnitId;
   if(channel.id!=='DEFAULT'&&!businessUnitId)return badRequest('A loja não possui unidade de negócio vinculada');
-  const database=requireDatabase(),id=randomUUID(),amount=money(Math.max(0,Number(body.openingAmount)||0));
-  await database.query('begin');
-  try{await database.query(`insert into pdv_cash_sessions(id,operator_id,seller_id,account_id,account_name,channel_id,channel_name,business_unit_id,business_unit_name,status,opening_amount) values($1,$2,$2,$3,$4,$5,$6,$7,$8,'OPEN',$9)`,[id,seller.id,account.id,account.name,channel.id,channel.name,businessUnitId??null,channel.businessUnitName??null,amount]);
-    await database.query(`insert into pdv_cash_operations(id,session_id,operation_type,amount,data) values($1,$2,'OPENING',$3,$4::jsonb)`,[randomUUID(),id,amount,JSON.stringify({controlOnly:true,syncStatus:'NOT_REQUIRED',source:'ADMIN'})]);
-    await database.query('commit');}catch(error){await database.query('rollback');throw error;}
+  const id=randomUUID(),amount=money(Math.max(0,Number(body.openingAmount)||0));
+  await withTransaction(async client=>{await client.query(`insert into pdv_cash_sessions(id,operator_id,seller_id,account_id,account_name,channel_id,channel_name,business_unit_id,business_unit_name,status,opening_amount) values($1,$2,$2,$3,$4,$5,$6,$7,$8,'OPEN',$9)`,[id,seller.id,account.id,account.name,channel.id,channel.name,businessUnitId??null,channel.businessUnitName??null,amount]);
+    await client.query(`insert into pdv_cash_operations(id,session_id,operation_type,amount,data) values($1,$2,'OPENING',$3,$4::jsonb)`,[randomUUID(),id,amount,JSON.stringify({controlOnly:true,syncStatus:'NOT_REQUIRED',source:'ADMIN'})]);});
   const session=await cashSessionById(id);await writeAdminAudit(req,'OPEN','cash_session',id,null,{session,openedBy:principal?.operatorName});return {session};
 });
 
@@ -515,31 +637,32 @@ app.post('/admin/cash/sessions/:id/reopen', async (req) => {
   if(await currentCashSession(session.operatorId))return conflict('O operador já possui outro caixa aberto');
   const version=await database.query('select coalesce(max(version),1)::int version from pdv_cash_closing_versions where session_id=$1',[id]) as {rows:any[]};
   const closingVersion=version.rows[0]?.version??1;
-  await database.query('begin');try{
-    await database.query(`insert into pdv_cash_reopenings(id,session_id,closing_version,justification,reopened_by,previous_summary) values($1,$2,$3,$4,$5,$6::jsonb)`,[randomUUID(),id,closingVersion,justification,principal?.operatorName??principal?.operatorId,JSON.stringify(session.closingSummary??{})]);
-    await database.query(`update pdv_cash_sessions set status='OPEN',closed_at=null,closing_summary=null where id=$1 and status='CLOSED'`,[id]);
-    await database.query(`insert into pdv_cash_operations(id,session_id,operation_type,amount,data) values($1,$2,'REOPENING',0,$3::jsonb)`,[randomUUID(),id,JSON.stringify({controlOnly:true,source:'ADMIN',justification,actor:principal?.operatorName})]);
-    await database.query('commit');
-  }catch(error){await database.query('rollback');throw error;}
+  await withTransaction(async client=>{
+    await client.query(`insert into pdv_cash_reopenings(id,session_id,closing_version,justification,reopened_by,previous_summary) values($1,$2,$3,$4,$5,$6::jsonb)`,[randomUUID(),id,closingVersion,justification,principal?.operatorName??principal?.operatorId,JSON.stringify(session.closingSummary??{})]);
+    const reopened=await client.query(`update pdv_cash_sessions set status='OPEN',closed_at=null,closing_summary=null where id=$1 and status='CLOSED' returning id`,[id]) as {rows:unknown[]};
+    if(!reopened.rows[0])return conflict('Caixa foi alterado por outro usuário');
+    await client.query(`insert into pdv_cash_operations(id,session_id,operation_type,amount,data) values($1,$2,'REOPENING',0,$3::jsonb)`,[randomUUID(),id,JSON.stringify({controlOnly:true,source:'ADMIN',justification,actor:principal?.operatorName})]);
+  });
   const updated=await cashSessionById(id);await writeAdminAudit(req,'REOPEN','cash_session',id,{status:'CLOSED',closingSummary:session.closingSummary},{status:'OPEN',justification,closingVersion});return {session:updated,closingVersion};
 });
 
 app.post('/admin/cash/sessions/:id/close', async (req) => {
   const principal=requireAdminOrManager(req),id=(req.params as {id:string}).id,body=req.body as {countedValues?:{name:string;amount:number}[];notes?:string};
-  const database=requireDatabase(),snapshot=await cashSessionSnapshot(id);if(snapshot.session.status!=='OPEN')return conflict('Caixa não está aberto');
+  const snapshot=await cashSessionSnapshot(id);if(snapshot.session.status!=='OPEN')return conflict('Caixa não está aberto');
   if(principal?.role==='OPERATOR'&&snapshot.session.operatorId!==principal.operatorId)throw Object.assign(new Error('Sem permissão para fechar este caixa'),{statusCode:403});
   const expected=new Map(snapshot.paymentTotals.map(item=>[item.name,item.amount]));const cashName=[...expected.keys()].find(name=>/dinheiro|cash/i.test(name))??'Dinheiro';expected.set(cashName,snapshot.expectedCash);
   const countedValues=body.countedValues?.length?body.countedValues:[...expected].map(([name,amount])=>({name,amount}));
   const counted=new Map(countedValues.map(item=>[item.name,money(Number(item.amount)||0)]));
   const reconciliation=[...new Set([...expected.keys(),...counted.keys()])].map(name=>({name,expected:money(expected.get(name)??0),counted:money(counted.get(name)??0),difference:money((counted.get(name)??0)-(expected.get(name)??0))}));
   const summary={closedAt:new Date().toISOString(),countedValues,reconciliation,totalDifference:money(reconciliation.reduce((sum,item)=>sum+item.difference,0)),expectedCash:snapshot.expectedCash,notes:body.notes?.trim()||undefined,closedBy:principal?.operatorName};
-  await database.query('begin');try{
-    const versionResult=await database.query('select coalesce(max(version),0)::int version from pdv_cash_closing_versions where session_id=$1',[id]) as {rows:any[]};const version=(versionResult.rows[0]?.version??0)+1;
-    const update=await database.query(`update pdv_cash_sessions set status='CLOSED',closed_at=now(),closing_summary=$2::jsonb where id=$1 and status='OPEN' returning closed_at`,[id,JSON.stringify(summary)]) as {rows:any[]};if(!update.rows[0])throw conflict('Caixa foi alterado por outro usuário');
-    await database.query(`insert into pdv_cash_closing_versions(id,session_id,version,closing_summary,closed_at,closed_by) values($1,$2,$3,$4::jsonb,$5,$6)`,[randomUUID(),id,version,JSON.stringify(summary),update.rows[0].closed_at,principal?.operatorName??principal?.operatorId]);
-    await database.query(`insert into pdv_cash_operations(id,session_id,operation_type,amount,data) values($1,$2,'CLOSING',0,$3::jsonb)`,[randomUUID(),id,JSON.stringify({controlOnly:true,source:'ADMIN',version,summary})]);await database.query('commit');
-    await writeAdminAudit(req,'CLOSE','cash_session',id,{status:'OPEN'},{status:'CLOSED',version,summary});return {closed:true,version,summary};
-  }catch(error){await database.query('rollback');throw error;}
+  const version=await withTransaction(async client=>{
+    const update=await client.query(`update pdv_cash_sessions set status='CLOSED',closed_at=now(),closing_summary=$2::jsonb where id=$1 and status='OPEN' returning closed_at`,[id,JSON.stringify(summary)]) as {rows:any[]};if(!update.rows[0])return conflict('Caixa foi alterado por outro usuário');
+    const versionResult=await client.query('select coalesce(max(version),0)::int version from pdv_cash_closing_versions where session_id=$1',[id]) as {rows:any[]};const version=(versionResult.rows[0]?.version??0)+1;
+    await client.query(`insert into pdv_cash_closing_versions(id,session_id,version,closing_summary,closed_at,closed_by) values($1,$2,$3,$4::jsonb,$5,$6)`,[randomUUID(),id,version,JSON.stringify(summary),update.rows[0].closed_at,principal?.operatorName??principal?.operatorId]);
+    await client.query(`insert into pdv_cash_operations(id,session_id,operation_type,amount,data) values($1,$2,'CLOSING',0,$3::jsonb)`,[randomUUID(),id,JSON.stringify({controlOnly:true,source:'ADMIN',version,summary})]);
+    return version;
+  });
+  await writeAdminAudit(req,'CLOSE','cash_session',id,{status:'OPEN'},{status:'CLOSED',version,summary});return {closed:true,version,summary};
 });
 
 app.get('/admin/audit', async (req) => {
@@ -677,20 +800,21 @@ app.post('/cash/sessions/open', async (req) => {
   const businessUnitName = useDefaultRouting ? 'Configuração padrão' : channel.businessUnitName ?? 'Unidade do Bling';
   const openingAmount = money(Math.max(0, Number(body.openingAmount) || 0));
   const sessionId = randomUUID();
-  const database = requireDatabase();
   const operationId = randomUUID();
-  await database.query(
-    `insert into pdv_cash_sessions (id, operator_id, seller_id, account_id, account_name, channel_id, channel_name,
-       business_unit_id, business_unit_name, status, opening_amount)
-     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,'OPEN',$10)`,
-    [sessionId, operatorId, body.sellerId ?? operatorId, account.id, account.name, channel.id, channel.name,
-      businessUnitId, businessUnitName, openingAmount]
-  );
-  await database.query(
-    `insert into pdv_cash_operations (id, session_id, operation_type, amount, data)
-     values ($1,$2,'OPENING',$3,$4::jsonb)`,
-    [operationId, sessionId, openingAmount, JSON.stringify({ account, syncStatus: 'NOT_REQUIRED', controlOnly: true })]
-  );
+  await withTransaction(async client => {
+    await client.query(
+      `insert into pdv_cash_sessions (id, operator_id, seller_id, account_id, account_name, channel_id, channel_name,
+         business_unit_id, business_unit_name, status, opening_amount)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,'OPEN',$10)`,
+      [sessionId, operatorId, body.sellerId ?? operatorId, account.id, account.name, channel.id, channel.name,
+        businessUnitId, businessUnitName, openingAmount]
+    );
+    await client.query(
+      `insert into pdv_cash_operations (id, session_id, operation_type, amount, data)
+       values ($1,$2,'OPENING',$3,$4::jsonb)`,
+      [operationId, sessionId, openingAmount, JSON.stringify({ account, syncStatus: 'NOT_REQUIRED', controlOnly: true })]
+    );
+  });
   return { session: await currentCashSession(operatorId), openingSyncStatus: 'NOT_REQUIRED', controlOnly: true };
 });
 app.post('/cash/entries', async (req) => {
@@ -701,6 +825,7 @@ app.post('/cash/entries', async (req) => {
   const database = requireDatabase();
   const session = await cashSessionById(body.sessionId);
   if (!session || session.status !== 'OPEN') return badRequest('Caixa não está aberto');
+  assertOwner(req, session.operatorId, 'Este caixa pertence a outro operador');
   const operationId = body.operationId || randomUUID();
   const existing = await database.query('select id, bling_entry_id as "blingEntryId", data from pdv_cash_operations where id=$1', [operationId]) as { rows: any[] };
   if (existing.rows[0]) return { id: operationId, blingEntryId: existing.rows[0].blingEntryId, idempotent: true, data: existing.rows[0].data };
@@ -736,6 +861,7 @@ app.get('/cash/day', async (req) => {
   const entries = await bling.cashEntries(date, query.accountId);
   if (!query.sessionId) return { date, salesCount: 0, salesTotal: 0, paymentTotals: [], blingEntries: entries, operations: [], expectedCash: 0, pendingSales: 0 };
   const snapshot = await cashSessionSnapshot(query.sessionId);
+  assertOwner(req, snapshot.session.operatorId, 'Este caixa pertence a outro operador');
   return {
     date,
     salesCount: snapshot.salesRows.length,
@@ -785,19 +911,16 @@ app.post('/cash/sessions/:id/reopen', async (req) => {
   if (!session) return badRequest('Caixa não encontrado');
   if (session.status === 'OPEN') return { reopened: true, session, idempotent: true };
   if (await currentCashSession(session.operatorId)) return badRequest('O operador já possui outro caixa aberto');
-  await database.query('begin');
-  try {
-    await database.query(`update pdv_cash_sessions set status='OPEN', closed_at=null, closing_summary=null where id=$1`, [id]);
-    await database.query(
+  await withTransaction(async client => {
+    const reopened = await client.query(`update pdv_cash_sessions set status='OPEN', closed_at=null, closing_summary=null where id=$1 and status='CLOSED' returning id`, [id]) as { rows: unknown[] };
+    if (!reopened.rows[0]) return conflict('Caixa foi alterado por outro usuário');
+    await client.query(
       `insert into pdv_cash_operations (id, session_id, operation_type, amount, data)
        values ($1,$2,'REOPENING',0,$3::jsonb)`,
       [randomUUID(), id, JSON.stringify({ syncStatus: 'NOT_REQUIRED', controlOnly: true })]
     );
-    await database.query('commit');
-  } catch (error) {
-    await database.query('rollback');
-    throw error;
-  }
+  });
+  await writeAdminAudit(req, 'REOPEN', 'cash_session', id, { status: 'CLOSED', closingSummary: session.closingSummary }, { status: 'OPEN', source: 'PDV' });
   return { reopened: true, session: await cashSessionById(id) };
 });
 app.delete('/cash/sessions/:id', async (req, reply) => {
@@ -813,15 +936,11 @@ app.delete('/cash/sessions/:id', async (req, reply) => {
   if ((salesResult.rows[0]?.count ?? 0) > 0 || (movementResult.rows[0]?.count ?? 0) > 0) {
     return reply.code(409).send({ message: 'Este caixa possui vendas, sangrias ou suprimentos. Exclua apenas aberturas de teste sem movimento.' });
   }
-  await database.query('begin');
-  try {
-    await database.query('delete from pdv_cash_operations where session_id=$1', [id]);
-    await database.query('delete from pdv_cash_sessions where id=$1', [id]);
-    await database.query('commit');
-  } catch (error) {
-    await database.query('rollback');
-    throw error;
-  }
+  await withTransaction(async client => {
+    await client.query('delete from pdv_cash_operations where session_id=$1', [id]);
+    await client.query('delete from pdv_cash_sessions where id=$1', [id]);
+  });
+  await writeAdminAudit(req, 'DELETE', 'cash_session', id, { session }, null);
   return { deleted: true, sessionId: id };
 });
 app.post('/cash/sessions/:id/close', async (req) => {
@@ -829,6 +948,7 @@ app.post('/cash/sessions/:id/close', async (req) => {
   const body = req.body as { countedValues?: { name: string; amount: number }[]; notes?: string };
   const database = requireDatabase();
   const snapshot = await cashSessionSnapshot(id);
+  assertOwner(req, snapshot.session.operatorId, 'Este caixa pertence a outro operador');
   if (snapshot.session.status !== 'OPEN') return badRequest('Caixa já está fechado');
   const expected = new Map(snapshot.paymentTotals.map(item => [item.name, item.amount]));
   const cashName = [...expected.keys()].find(name => /dinheiro|cash/i.test(name)) ?? 'Dinheiro';
@@ -856,22 +976,25 @@ app.post('/cash/sessions/:id/close', async (req) => {
     notes: body.notes?.trim() || undefined,
     blingEntries: entries
   };
-  await database.query('begin');
-  try {
-    await database.query(
-      `update pdv_cash_sessions set status='CLOSED', closed_at=now(), closing_summary=$2::jsonb where id=$1 and status='OPEN'`,
+  await withTransaction(async client => {
+    const closed = await client.query(
+      `update pdv_cash_sessions set status='CLOSED', closed_at=now(), closing_summary=$2::jsonb where id=$1 and status='OPEN' returning closed_at`,
       [id, JSON.stringify(summary)]
+    ) as { rows: { closed_at: Date }[] };
+    if (!closed.rows[0]) return conflict('Caixa foi alterado por outro usuário');
+    const versionResult = await client.query('select coalesce(max(version),0)::int version from pdv_cash_closing_versions where session_id=$1', [id]) as { rows: { version: number }[] };
+    const version = (versionResult.rows[0]?.version ?? 0) + 1;
+    await client.query(
+      `insert into pdv_cash_closing_versions (id, session_id, version, closing_summary, closed_at, closed_by) values ($1,$2,$3,$4::jsonb,$5,$6)`,
+      [randomUUID(), id, version, JSON.stringify(summary), closed.rows[0].closed_at, principalFromRequest(req)?.operatorName ?? snapshot.session.operatorId]
     );
-    await database.query(
+    await client.query(
       `insert into pdv_cash_operations (id, session_id, operation_type, amount, data)
        values ($1,$2,'CLOSING',0,$3::jsonb)`,
       [randomUUID(), id, JSON.stringify({ syncStatus: 'NOT_REQUIRED', summary })]
     );
-    await database.query('commit');
-  } catch (error) {
-    await database.query('rollback');
-    throw error;
-  }
+  });
+  await writeAdminAudit(req, 'CLOSE', 'cash_session', id, { status: 'OPEN' }, { status: 'CLOSED', summary, source: 'PDV' });
   return { closed: true, sessionId: id, summary };
 });
 
@@ -1044,18 +1167,27 @@ app.post('/sales', async (req) => {
   };
   sale.blingDraftStatusId = await bling.findInServiceStatusId();
   const order = await bling.createOrder(blingOrderInput(sale, session, []));
-  const createdContact = await bling.getOrderContact(order.id);
-  if (sale.customer?.bling?.id && createdContact.id !== sale.customer.bling.id) {
-    throw new Error('Bling criou o pedido com um contato diferente do cliente confirmado; a venda não será vinculada no PDV');
+  try {
+    const createdContact = await bling.getOrderContact(order.id);
+    if (sale.customer?.bling?.id && createdContact.id !== sale.customer.bling.id) {
+      throw new Error('Bling criou o pedido com um contato diferente do cliente confirmado; a venda não será vinculada no PDV');
+    }
+    sale.blingOrderId = order.id;
+    sale.blingOrderNumber = order.number;
+    await persist(sale);
+  } catch (error) {
+    // Sem a venda no PDV, o rascunho ficaria órfão "Em atendimento" no Bling.
+    sales.delete(sale.id);
+    await bling.deleteDraftOrder(order.id).catch(cleanupError =>
+      app.log.error({ err: cleanupError, blingOrderId: order.id, saleId: sale.id }, 'Rascunho criado no Bling sem venda no PDV; excluir manualmente'));
+    throw error;
   }
-  sale.blingOrderId = order.id;
-  sale.blingOrderNumber = order.number;
-  await persist(sale);
   return sale;
 });
 app.put('/sales/:id', async (req) => {
   const sale = await getSale((req.params as { id: string }).id);
   if (!sale) return badRequest('Venda em atendimento não encontrada');
+  assertOwner(req, sale.operatorId, 'Esta venda pertence a outro operador');
   if (sale.status !== 'OPEN') return conflict('Somente vendas em atendimento podem ser atualizadas');
   const body = req.body as { sellerId?: string; categoryId?: string; items?: SaleItem[]; customerCpf?: string; customerSaleId?: string; manualDiscount?: number; freight?: number; observations?: string; emitFiscal?: boolean; payments?: PaymentSplit[]; draftStep?: Sale['draftStep'] };
   if (!body.items?.length) return badRequest('Adicione ao menos um produto');
@@ -1124,15 +1256,17 @@ app.put('/sales/:id', async (req) => {
 });
 app.get('/sales/open', async (req) => {
   const cashSessionId = String((req.query as { cashSessionId?: string }).cashSessionId ?? '');
+  const ownerId = ownSalesFilter(req);
   if (pool) {
-    const result = await pool.query(`select data from pdv_sales where status='OPEN' and ($1='' or data->>'cashSessionId'=$1) order by updated_at desc limit 50`, [cashSessionId]) as { rows: { data: Sale }[] };
+    const result = await pool.query(`select data from pdv_sales where status='OPEN' and ($1='' or data->>'cashSessionId'=$1) and ($2='' or data->>'operatorId'=$2) order by updated_at desc limit 50`, [cashSessionId, ownerId]) as { rows: { data: Sale }[] };
     return result.rows.map(row => row.data);
   }
-  return [...sales.values()].filter(item => item.status === 'OPEN' && (!cashSessionId || item.cashSessionId === cashSessionId));
+  return [...sales.values()].filter(item => item.status === 'OPEN' && (!cashSessionId || item.cashSessionId === cashSessionId) && (!ownerId || item.operatorId === ownerId));
 });
 app.get('/sales/:id', async (req) => {
   const sale = await getSale((req.params as { id: string }).id);
   if (!sale) throw Object.assign(new Error('Venda não encontrada'), { statusCode: 404 });
+  assertOwner(req, sale.operatorId, 'Esta venda pertence a outro operador');
   return sale;
 });
 const couponApplications = new Map<string, { code: string; promise: Promise<Sale> }>();
@@ -1141,6 +1275,7 @@ app.post('/sales/:id/coupon', async (req) => {
   const rawCode = (req.body as { code?: string } | undefined)?.code;
   const code = String(rawCode ?? '').trim().toUpperCase();
   if (!code) return badRequest('Informe o código do cupom Fidelizei');
+  if (sale) assertOwner(req, sale.operatorId, 'Esta venda pertence a outro operador');
   const fidelizeiCustomer = sale?.customer?.fidelizei;
   if (!sale || !fidelizeiCustomer) return badRequest('Cliente não cadastrado no Fidelizei');
   if (sale.status !== 'OPEN') return conflict('Este pedido não está aberto para aplicar cupom');
@@ -1164,7 +1299,7 @@ app.post('/sales/:id/coupon', async (req) => {
         const refreshed = await databaseClient.query('select data from pdv_sales where id = $1', [sale.id]) as { rows: { data: Sale }[] };
         if (refreshed.rows[0]) {
           sale = refreshed.rows[0].data;
-          sales.set(sale.id, sale);
+          cacheSale(sale);
         }
       }
 
@@ -1258,7 +1393,7 @@ const claimSaleForCompletion = async (id: string, fallback: Sale) => {
     ) as { rows: { data: Sale }[] };
     if (!result.rows[0]) return conflict('Venda já está sendo processada ou foi concluída');
     const claimed = result.rows[0].data;
-    sales.set(id, claimed);
+    cacheSale(claimed);
     return claimed;
   }
   if (processingSales.has(id) || fallback.status !== 'OPEN') return conflict('Venda já está sendo processada ou foi concluída');
@@ -1271,6 +1406,7 @@ app.post('/sales/:id/complete', async (req) => {
   const original = await getSale(id);
   const body = req.body as { paymentMethodId?: string; payments?: PaymentSplit[] };
   if (!original) return conflict('Venda não encontrada');
+  assertOwner(req, original.operatorId, 'Esta venda pertence a outro operador');
   if (original.status === 'SYNC_FAILED') {
     if (/Bling não criou o pedido \(HTTP 4\d\d\)/.test(original.lastError ?? '')) {
       original.status = 'OPEN';
@@ -1376,15 +1512,16 @@ app.post('/sales/:id/complete', async (req) => {
 app.get('/sales/recent', async (req) => {
   const rawLimit = Number((req.query as { limit?: string }).limit ?? 10);
   const limit = Math.max(1, Math.min(30, Number.isFinite(rawLimit) ? rawLimit : 10));
+  const ownerId = ownSalesFilter(req);
   if (pool) {
     const result = await pool.query(
-      `select data from pdv_sales where status in ('COMPLETED','RECONCILIATION_REQUIRED') order by updated_at desc limit $1`,
-      [limit]
+      `select data from pdv_sales where status in ('COMPLETED','RECONCILIATION_REQUIRED') and ($2='' or data->>'operatorId'=$2) order by updated_at desc limit $1`,
+      [limit, ownerId]
     ) as { rows: { data: Sale }[] };
     return result.rows.map(row => row.data);
   }
   return [...sales.values()]
-    .filter(item => item.status !== 'OPEN')
+    .filter(item => item.status !== 'OPEN' && (!ownerId || item.operatorId === ownerId))
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
     .slice(0, limit);
 });
@@ -1402,6 +1539,8 @@ app.get('/sales/orders', async (req) => {
     if (query.from) filters.push(`(data->>'createdAt')::timestamptz >= ${add(`${query.from}T00:00:00-03:00`)}::timestamptz`);
     if (query.to) filters.push(`(data->>'createdAt')::timestamptz < (${add(`${query.to}T00:00:00-03:00`)}::timestamptz + interval '1 day')`);
     if (query.status) filters.push(`status = ${add(query.status)}`);
+    const ownerId = ownSalesFilter(req);
+    if (ownerId) filters.push(`data->>'operatorId' = ${add(ownerId)}`);
     if (query.scope === 'active') filters.push(`status not in ('CANCELLED','DELETED')`);
     if (query.scope === 'deleted') filters.push(`(status = 'DELETED' or (status='CANCELLED' and coalesce(data->>'cancellationKind','')=''))`);
     if (query.scope === 'cancelled') filters.push(`status = 'CANCELLED' and data->>'cancellationKind'='CANCELLED'`);
@@ -1431,7 +1570,9 @@ app.get('/sales/orders', async (req) => {
       }
     };
   }
+  const ownerId = ownSalesFilter(req);
   const orders = [...sales.values()].map(normalizeLegacyStatus)
+    .filter(item => !ownerId || item.operatorId === ownerId)
     .filter(item => !query.from || item.createdAt.slice(0, 10) >= query.from)
     .filter(item => !query.to || item.createdAt.slice(0, 10) <= query.to)
     .filter(item => !query.status || item.status === query.status)
@@ -1444,70 +1585,77 @@ app.get('/sales/orders', async (req) => {
   const active = orders.filter(item => !['CANCELLED','DELETED'].includes(item.status));
   return { orders, summary: { count: active.length, total: money(active.reduce((sum, item) => sum + item.total, 0)), cancelled: orders.filter(item => item.status === 'CANCELLED').length, deleted: orders.filter(item => item.status === 'DELETED').length } };
 });
-const deleteSale = async (req: any) => {
-  const id = (req.params as { id: string }).id;
-  const sale = await getSale(id);
-  if (!sale) return badRequest('Pedido não encontrado no PDV');
-  if (sale.status === 'DELETED') return { ...sale, idempotent: true };
-  if (sale.status === 'CANCELLED') return badRequest('Pedido cancelado não pode ser excluído por este fluxo');
-  const deletion = sale.blingOrderId
-    ? sale.status === 'OPEN' ? await bling.deleteDraftOrder(sale.blingOrderId) : await bling.deleteOrder(sale.blingOrderId)
-    : { deleted: false, warnings: [] as string[] };
-  let loyaltyWarning: string | undefined;
-  if (sale.fidelizeiTransactionId) {
-    try { await fidelizei.reverseSale(sale.id); }
-    catch (error) { loyaltyWarning = error instanceof Error ? error.message.slice(0, 400) : 'Estorno Fidelizei pendente'; }
+const reverseLoyalty = async (sale: Sale) => {
+  // Devolve cupom e pontos da venda no Fidelizei. Uma falha não impede o
+  // cancelamento no Bling: fica registrada no pedido para conferência.
+  if (!sale.coupon && !sale.fidelizeiTransactionId) return undefined;
+  try {
+    await fidelizei.reverseSale(sale.id);
+    return undefined;
+  } catch (error) {
+    return error instanceof Error ? error.message.slice(0, 400) : 'Estorno Fidelizei pendente';
   }
-  if (pool && ['COMPLETED', 'RECONCILIATION_REQUIRED'].includes(sale.status)) {
-    await pool.query(
-      `update bling_products product set stock=product.stock+item.quantity
-       from jsonb_to_recordset($1::jsonb) as item("productId" text, quantity numeric)
-       where product.id=item."productId"`,
-      [JSON.stringify(sale.items.map(item => ({ productId: item.productId, quantity: item.quantity })))]
-    );
-  }
-  sale.status = 'DELETED';
-  Object.assign(sale, { deletedAt: new Date().toISOString(), deletionKind: 'DELETED' });
-  sale.lastError = [loyaltyWarning, ...(deletion.warnings ?? [])].filter(Boolean).join(' · ') || undefined;
-  await persist(sale);
-  return { ...sale, deletedInBling: Boolean(sale.blingOrderId), loyaltyWarning, blingWarnings: deletion.warnings };
 };
+const restoreLocalStock = async (sale: Sale) => {
+  if (!pool || !['COMPLETED', 'RECONCILIATION_REQUIRED'].includes(sale.status)) return;
+  await pool.query(
+    `update bling_products product set stock=product.stock+item.quantity
+     from jsonb_to_recordset($1::jsonb) as item("productId" text, quantity numeric)
+     where product.id=item."productId"`,
+    [JSON.stringify(sale.items.map(item => ({ productId: item.productId, quantity: item.quantity })))]
+  );
+};
+const reverseSaleOrder = (req: any, kind: 'CANCEL' | 'DELETE', source: 'PDV' | 'ADMIN') =>
+  withSaleLock((req.params as { id: string }).id, async sale => {
+    if (!sale) return badRequest('Pedido não encontrado no PDV');
+    assertOwner(req, sale.operatorId, 'Este pedido pertence a outro operador');
+    if (kind === 'DELETE') {
+      if (sale.status === 'DELETED') return { ...sale, idempotent: true };
+      if (sale.status === 'CANCELLED') return badRequest('Pedido cancelado não pode ser excluído por este fluxo');
+    } else {
+      if (sale.status === 'CANCELLED') return { ...sale, idempotent: true };
+      if (sale.status === 'DELETED') return badRequest('Pedido excluído não pode ser cancelado');
+      if (!sale.blingOrderId) return badRequest('Pedido ainda não foi criado no Bling');
+    }
+    if (sale.status === 'PROCESSING') return conflict('A venda está sendo finalizada. Aguarde a conclusão antes de cancelar ou excluir');
+    if (reversalRequiresSupervisor(sale.status)) requireManager(req);
+    const before = { status: sale.status, total: sale.total, payments: sale.payments, coupon: sale.coupon };
+    const blingResult = kind === 'DELETE'
+      ? sale.blingOrderId
+        ? sale.status === 'OPEN' ? await bling.deleteDraftOrder(sale.blingOrderId) : await bling.deleteOrder(sale.blingOrderId)
+        : { warnings: [] as string[] }
+      : sale.status === 'OPEN' ? await bling.cancelDraftOrder(sale.blingOrderId!) : await bling.cancelOrder(sale.blingOrderId!);
+    const loyaltyWarning = await reverseLoyalty(sale);
+    await restoreLocalStock(sale);
+    const warnings = [loyaltyWarning, ...(blingResult.warnings ?? [])].filter(Boolean).join(' · ') || undefined;
+    if (kind === 'DELETE') {
+      sale.status = 'DELETED';
+      Object.assign(sale, { deletedAt: new Date().toISOString(), deletionKind: 'DELETED' });
+    } else {
+      sale.status = 'CANCELLED';
+      sale.cancelledAt = new Date().toISOString();
+      Object.assign(sale, { cancellationKind: 'CANCELLED' });
+    }
+    sale.lastError = warnings;
+    await persist(sale);
+    await writeAdminAudit(req, kind, 'sale', sale.id, before, { status: sale.status, total: sale.total, operatorId: sale.operatorId, source, warnings });
+    return kind === 'DELETE'
+      ? { ...sale, deletedInBling: Boolean(sale.blingOrderId), loyaltyWarning, blingWarnings: blingResult.warnings }
+      : { ...sale, cancelledInBling: true, loyaltyWarning, blingWarnings: blingResult.warnings };
+  });
+const deleteSale = (req: any) => reverseSaleOrder(req, 'DELETE', 'PDV');
 app.delete('/sales/:id', deleteSale);
 // Alguns navegadores, proxies e redes corporativas bloqueiam DELETE. A ação POST
 // preserva a mesma semântica e torna a exclusão operacional no caixa.
 app.post('/sales/:id/delete', deleteSale);
-app.post('/sales/:id/cancel', async (req) => {
-  const id = (req.params as { id: string }).id;
-  const sale = await getSale(id);
-  if (!sale) return badRequest('Pedido não encontrado no PDV');
-  if (sale.status === 'CANCELLED') return { ...sale, idempotent: true };
-  if (sale.status === 'DELETED') return badRequest('Pedido excluído não pode ser cancelado');
-  if (!sale.blingOrderId) return badRequest('Pedido ainda não foi criado no Bling');
-  const cancellation = sale.status === 'OPEN' ? await bling.cancelDraftOrder(sale.blingOrderId) : await bling.cancelOrder(sale.blingOrderId);
-  let loyaltyWarning: string | undefined;
-  if (sale.fidelizeiTransactionId) {
-    try { await fidelizei.reverseSale(sale.id); }
-    catch (error) { loyaltyWarning = error instanceof Error ? error.message.slice(0, 400) : 'Estorno Fidelizei pendente'; }
-  }
-  if (pool && ['COMPLETED', 'RECONCILIATION_REQUIRED'].includes(sale.status)) {
-    await pool.query(
-      `update bling_products product set stock=product.stock+item.quantity
-       from jsonb_to_recordset($1::jsonb) as item("productId" text, quantity numeric)
-       where product.id=item."productId"`,
-      [JSON.stringify(sale.items.map(item => ({ productId: item.productId, quantity: item.quantity })))]
-    );
-  }
-  sale.status = 'CANCELLED';
-  sale.cancelledAt = new Date().toISOString();
-  Object.assign(sale, { cancellationKind: 'CANCELLED', lastError: [loyaltyWarning, ...(cancellation.warnings ?? [])].filter(Boolean).join(' · ') || undefined });
-  await persist(sale);
-  return { ...sale, cancelledInBling: true, loyaltyWarning, blingWarnings: cancellation.warnings };
-});
+app.post('/sales/:id/cancel', async (req) => reverseSaleOrder(req, 'CANCEL', 'PDV'));
 app.post('/sales/:id/reverse-fidelizei', async (req) => {
   requireManager(req);
   const sale = await getSale((req.params as { id: string }).id);
-  if (!sale?.fidelizeiTransactionId) return badRequest('Venda sem transação Fidelizei para estorno');
-  return fidelizei.reverseSale(sale.id);
+  if (!sale || (!sale.fidelizeiTransactionId && !sale.coupon)) return badRequest('Venda sem cupom ou transação Fidelizei para estorno');
+  const result = await fidelizei.reverseSale(sale.id);
+  await writeAdminAudit(req, 'FIDELIZEI_REVERSE', 'sale', sale.id, null, { result });
+  return result;
 });
 const shutdown = async (signal: string) => {
   app.log.info({ signal }, 'Encerrando o PDV com segurança');

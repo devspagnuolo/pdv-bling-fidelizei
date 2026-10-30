@@ -1,21 +1,16 @@
--- PostgreSQL: modelo inicial (UUID, timestamps e ids externos são obrigatórios)
-create table sales (
-  id uuid primary key, status text not null, operator_id text not null, seller_id text not null,
-  customer_id text, bling_order_id text unique, fidelizei_transaction_id text,
-  coupon_id text, subtotal numeric(12,2) not null, discount numeric(12,2) not null,
-  total numeric(12,2) not null, payment_method text not null, fiscal_status text not null default 'PENDING',
-  created_at timestamptz not null default now(), completed_at timestamptz
-);
-create table sale_items (
-  id uuid primary key, sale_id uuid not null references sales(id), product_id text not null,
-  sku text not null, description text not null, quantity numeric(12,3) not null,
-  unit_price numeric(12,2) not null, line_total numeric(12,2) not null
-);
-create table integration_events (
-  id uuid primary key, provider text not null, event_type text not null, idempotency_key text not null unique,
-  payload jsonb not null, status text not null, attempts int not null default 0, created_at timestamptz not null default now()
-);
-create table coupon_reservations (
-  id uuid primary key, sale_id uuid not null references sales(id), coupon_id text not null,
-  external_reservation_id text unique, status text not null, expires_at timestamptz not null
-);
+-- O esquema real é criado e migrado na partida da API por apps/api/src/db.ts
+-- (initializeDatabase). Consulte aquele arquivo como fonte de verdade.
+--
+-- Tabelas principais:
+--   pdv_sales                  vendas (documento JSONB) e status
+--   pdv_cash_sessions          caixas abertos/fechados por operador
+--   pdv_cash_operations        abertura, sangria, suprimento, fechamento
+--   pdv_cash_closing_versions  versões de fechamento (somente inclusão)
+--   pdv_cash_reopenings        reaberturas com justificativa (somente inclusão)
+--   pdv_admin_audit_logs       trilha de auditoria (somente inclusão)
+--   pdv_operator_credentials   PIN individual (hash scrypt) e perfil por vendedor
+--   pdv_revoked_tokens         sessões encerradas antes de expirar
+--   integration_credentials    tokens OAuth do Bling (AES-256-GCM)
+--   oauth_states               estados OAuth temporários
+--   bling_products             cache do catálogo do Bling
+--   bling_webhook_events       fila persistente de webhooks do Bling

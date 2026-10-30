@@ -59,7 +59,7 @@ type CashDay = {
 };
 type OperationModal = 'open' | 'withdrawal' | 'supply' | 'close' | 'control' | 'orders' | 'return' | 'pending';
 type Step = 'product' | 'customer' | 'payment';
-type AuthPrincipal = { operatorId: string; operatorName: string; role: 'OPERATOR' | 'MANAGER' };
+type AuthPrincipal = { operatorId: string; operatorName: string; role: 'OPERATOR' | 'MANAGER' | 'ADMIN' };
 const storedPrincipal = (): Partial<AuthPrincipal> => {
   try { return JSON.parse(sessionStorage.getItem('pdv-auth-principal') ?? '{}'); } catch { return {}; }
 };
@@ -101,8 +101,9 @@ function App() {
   const [seller, setSeller] = useState('');
   const [operatorId, setOperatorId] = useState(() => sessionStorage.getItem('pdv-auth-token') ? String(storedPrincipal().operatorId ?? '') : '');
   const [operatorName, setOperatorName] = useState(() => sessionStorage.getItem('pdv-auth-token') ? String(storedPrincipal().operatorName ?? '') : '');
-  const [authRole, setAuthRole] = useState<'OPERATOR' | 'MANAGER' | undefined>(() => sessionStorage.getItem('pdv-auth-token') ? storedPrincipal().role : undefined);
+  const [authRole, setAuthRole] = useState<AuthPrincipal['role'] | undefined>(() => sessionStorage.getItem('pdv-auth-token') ? storedPrincipal().role : undefined);
   const [authEnabled, setAuthEnabled] = useState<boolean>();
+  const isSupervisor = authRole === 'MANAGER' || authRole === 'ADMIN';
   const [authToken, setAuthToken] = useState(() => sessionStorage.getItem('pdv-auth-token') ?? '');
   const [loginOperator, setLoginOperator] = useState('');
   const [loginPin, setLoginPin] = useState('');
@@ -813,7 +814,16 @@ function App() {
       setMessage('Status das conexões atualizado.');
     } catch (error) { setMessage(error instanceof Error ? error.message : 'Falha ao atualizar as conexões.'); }
   };
+  const connectBling = async () => {
+    try {
+      const response = await apiFetch(`${api}/integrations/bling/connect`, { method: 'POST' });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.url) throw new Error(data.message ?? 'Não foi possível iniciar a conexão com o Bling.');
+      window.location.assign(data.url);
+    } catch (error) { setMessage(error instanceof Error ? error.message : 'Falha ao conectar o Bling.'); }
+  };
   const logout = () => {
+    if (authToken) void fetch(`${api}/auth/logout`, { method: 'POST', headers: { Authorization: `Bearer ${authToken}` } }).catch(() => undefined);
     sessionStorage.removeItem('pdv-auth-token');
     sessionStorage.removeItem('pdv-auth-principal');
     setAuthToken('');
@@ -932,7 +942,7 @@ function App() {
     finally { setOperationBusy(false); }
   };
   const openOperation = (type: OperationModal) => {
-    if (type === 'control' && authRole !== 'MANAGER') {
+    if (type === 'control' && !isSupervisor) {
       setMenuOpen(false);
       setMessage('O Controle de caixa é um relatório exclusivo da gerência.');
       return;
@@ -1064,7 +1074,7 @@ function App() {
     <header className="pos-header">
       <div className="brand-block"><img className="vivi-logo" src="/vivi-logo-original.png" alt="Vivi Moda Plus Size" /><div><small>VIVI MODA · CAIXA 01</small><h1>Frente de caixa</h1><p>Venda integrada ao Bling e Fidelizei</p></div></div>
       <div className="header-actions">
-        {authEnabled ? <div className="operator-select authenticated-operator"><span>Operador</span><b>{operatorName || 'Definido na abertura'}</b><small>{authToken ? authRole === 'MANAGER' ? 'Gerente' : 'Operador' : 'Caixa fechado'}</small>{authToken && <button onClick={logout}>Sair</button>}</div> : <label className="operator-select"><span>Operador</span><select value={operatorId} onChange={e => setOperatorId(e.target.value)}>
+        {authEnabled ? <div className="operator-select authenticated-operator"><span>Operador</span><b>{operatorName || 'Definido na abertura'}</b><small>{authToken ? isSupervisor ? 'Gerente' : 'Operador' : 'Caixa fechado'}</small>{authToken && <button onClick={logout}>Sair</button>}</div> : <label className="operator-select"><span>Operador</span><select value={operatorId} onChange={e => setOperatorId(e.target.value)}>
           <option value="">Selecione no Bling</option>{sellers.map(s => <option value={s.id} key={s.id}>{s.name}</option>)}
         </select></label>}
         <div className="operations-wrap">
@@ -1074,7 +1084,7 @@ function App() {
             <button disabled={!cashSession} onClick={() => openOperation('withdrawal')}><span>↘</span><div>Sangria<small>Registra débito em Caixas e Bancos</small></div></button>
             <button disabled={!cashSession} onClick={() => openOperation('supply')}><span>↗</span><div>Suprimento<small>Registra crédito em Caixas e Bancos</small></div></button>
             <button disabled={!cashSession} onClick={() => openOperation('close')}><span>□</span><div>Fechar caixa<small>Conferir o movimento do dia</small></div></button>
-            {authRole === 'MANAGER' && <button onClick={() => openOperation('control')}><span>▥</span><div>Controle de caixa<small>Relatório exclusivo da gerência</small></div></button>}
+            {isSupervisor && <button onClick={() => openOperation('control')}><span>▥</span><div>Controle de caixa<small>Relatório exclusivo da gerência</small></div></button>}
             <button onClick={() => openOperation('orders')}><span>☷</span><div>Pedidos do PDV<small>Consultar, conferir e excluir no Bling</small></div></button>
             <button onClick={() => printReceipt()} disabled={!sale?.blingOrderId}><span>▣</span><div>Imprimir<small>Comprovante da venda atual</small></div></button>
             <button onClick={() => void reprintLast()}><span>▤</span><div>Reimprimir última operação<small>Busca a última venda concluída</small></div></button>
@@ -1092,7 +1102,7 @@ function App() {
       <div>
         <span className={integrations?.bling.connected ? 'integration-dot online' : 'integration-dot'} />
         <div><b>Bling</b><small>{integrations?.bling.connected ? 'Conectado ao PDV' : integrations?.bling.configured ? 'Pronto para autorizar' : 'Configuração pendente'}</small></div>
-        {integrations?.bling.configured && <div className="connection-actions"><button onClick={() => void refreshConnections()} title="Atualizar status">↻</button><a href={`${api}/integrations/bling/connect`}>{integrations.bling.connected ? 'Reconectar' : 'Conectar'}</a></div>}
+        {integrations?.bling.configured && <div className="connection-actions"><button onClick={() => void refreshConnections()} title="Atualizar status">↻</button>{(!authEnabled || isSupervisor) && <button onClick={() => void connectBling()}>{integrations.bling.connected ? 'Reconectar' : 'Conectar'}</button>}</div>}
       </div>
       <div>
         <span className={integrations?.fidelizaPlus.connected ? 'integration-dot online' : 'integration-dot'} />
@@ -1394,7 +1404,7 @@ function App() {
           <div className="report-filters order-filters"><label>Início<input type="date" value={orderFrom} onChange={event => setOrderFrom(event.target.value)} /></label><label>Fim<input type="date" value={orderTo} onChange={event => setOrderTo(event.target.value)} /></label><label>Cliente, CPF ou pedido<input value={orderSearch} placeholder="Pesquisar" onChange={event => setOrderSearch(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') void loadOrders(); }} /></label><button className="finish" disabled={operationBusy} onClick={() => void loadOrders()}>Filtrar pedidos</button></div>
           <div className="closing-summary order-summary"><div><small>Pedidos ativos</small><b>{ordersSummary.count}</b></div><div><small>Total ativo</small><b>{brl.format(ordersSummary.total)}</b></div><div><small>Excluídos</small><b>{ordersSummary.deleted}</b></div><div><small>Cancelados</small><b>{ordersSummary.cancelled}</b></div></div>
           <div className="order-table"><div className="table-head"><span>Número</span><span>Data</span><span>Cliente</span><span>Total</span><span>Situação</span><span>Ações</span></div>{orders.map(item => <div className="table-row" key={item.id}>
-            <b>{item.blingOrderNumber ?? item.blingOrderId ?? item.id.slice(0, 8)}</b><span>{new Date(item.createdAt).toLocaleString('pt-BR')}</span><span>{item.customer?.name ?? 'Consumidor Final'}<small>{item.customer?.cpf ?? ''}</small></span><b>{brl.format(item.total)}</b><span className={item.status === 'DELETED' || item.status === 'CANCELLED' ? 'status-cancelled' : 'status-open'}>{item.status === 'DELETED' ? 'Excluído' : item.status === 'CANCELLED' ? 'Cancelado' : item.status === 'COMPLETED' ? 'Atendido' : item.status === 'OPEN' ? item.draftSyncStatus === 'PENDING' ? 'Em atendimento · sincronização pendente' : 'Em atendimento' : item.status}</span><span className="order-row-actions">{item.status === 'OPEN' && item.cashSessionId === cashSession?.id && <button className="resume-action" disabled={operationBusy} onClick={() => void resumeSale(item)}>Retomar</button>}{!['DELETED','CANCELLED','PROCESSING'].includes(item.status) && <><button className="cancel-action" disabled={operationBusy} onClick={() => void cancelOrder(item)}>Cancelar</button><button className="danger-action" disabled={operationBusy} onClick={() => void deleteOrder(item)}>Excluir</button></>}</span>
+            <b>{item.blingOrderNumber ?? item.blingOrderId ?? item.id.slice(0, 8)}</b><span>{new Date(item.createdAt).toLocaleString('pt-BR')}</span><span>{item.customer?.name ?? 'Consumidor Final'}<small>{item.customer?.cpf ?? ''}</small></span><b>{brl.format(item.total)}</b><span className={item.status === 'DELETED' || item.status === 'CANCELLED' ? 'status-cancelled' : 'status-open'}>{item.status === 'DELETED' ? 'Excluído' : item.status === 'CANCELLED' ? 'Cancelado' : item.status === 'COMPLETED' ? 'Atendido' : item.status === 'OPEN' ? item.draftSyncStatus === 'PENDING' ? 'Em atendimento · sincronização pendente' : 'Em atendimento' : item.status}</span><span className="order-row-actions">{item.status === 'OPEN' && item.cashSessionId === cashSession?.id && <button className="resume-action" disabled={operationBusy} onClick={() => void resumeSale(item)}>Retomar</button>}{!['DELETED','CANCELLED','PROCESSING'].includes(item.status) && (item.status === 'OPEN' || !authEnabled || isSupervisor) && <><button className="cancel-action" disabled={operationBusy} onClick={() => void cancelOrder(item)}>Cancelar</button><button className="danger-action" disabled={operationBusy} onClick={() => void deleteOrder(item)}>Excluir</button></>}</span>
           </div>)}{!orders.length && <div className="empty-state compact">{operationBusy ? 'Consultando pedidos…' : 'Nenhum pedido encontrado no período.'}</div>}</div>
         </div>}
         {operationModal === 'pending' && <div className="return-list pending-list">

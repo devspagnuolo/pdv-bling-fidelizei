@@ -5,10 +5,14 @@
     "node": "24.x",
     "npm": "11.x"
   },
-  "workspaces": ["apps/*", "packages/*"],
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "scripts": {
     "dev": "npm run dev -w @pdv/api",
     "dev:web": "npm run dev -w @pdv/web",
-    "build": "npm run build -w @pdv/api && npm run build -w @pdv/web"
+    "build": "npm run build -w @pdv/api && npm run build -w @pdv/web",
+    "test": "npm test -w @pdv/api"
   }
 }
