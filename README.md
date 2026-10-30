@@ -9,6 +9,16 @@ Base de um PDV que orquestra, sem substituir, Bling (catálogo, pedido e fiscal)
 - `docs`: arquitetura e modelo de dados.
 - `render.yaml`: infraestrutura de implantação no Render.
 
+## Desenvolvimento
+
+```bash
+npm ci
+npm run build
+npm test
+```
+
+Variáveis de ambiente: `apps/api/.env.example`. Checklist de produção: `docs/production-readiness.md`.
+
 ## Fluxo protegido
 
 1. Operador inicia uma venda e escolhe o vendedor.
