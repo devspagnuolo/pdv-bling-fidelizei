@@ -12,6 +12,7 @@ import { initializeDatabase, pool, withTransaction } from './db.js';
 import { money, type Customer, type PaymentSplit, type Sale, type SaleItem } from './domain.js';
 import { getWebhookHealth, registerBlingWebhooks } from './webhooks.js';
 import { authConfigured, authenticatePin, issueToken, principalFromRequest, verifyToken } from './auth.js';
+import { canAccessOperatorResource, isSupervisor, reversalRequiresSupervisor } from './access.js';
 
 const app = Fastify({ logger: true });
 app.removeContentTypeParser('application/json');
@@ -53,10 +54,20 @@ app.addHook('preHandler', async (req, reply) => {
 });
 const requireManager = (req: Parameters<typeof principalFromRequest>[0]) => {
   const principal = principalFromRequest(req);
-  if (authConfigured() && principal?.role !== 'MANAGER') {
+  if (authConfigured() && !isSupervisor(principal)) {
     throw Object.assign(new Error('Esta operação exige perfil de gerente'), { statusCode: 403 });
   }
   return principal;
+};
+const assertOwner = (req: Parameters<typeof principalFromRequest>[0], ownerId: string | undefined, message: string) => {
+  if (!canAccessOperatorResource(authConfigured(), principalFromRequest(req), ownerId)) {
+    throw Object.assign(new Error(message), { statusCode: 403 });
+  }
+};
+// Filtro SQL para listas do PDV: operador vê apenas as próprias vendas.
+const ownSalesFilter = (req: Parameters<typeof principalFromRequest>[0]) => {
+  const principal = principalFromRequest(req);
+  return authConfigured() && principal && !isSupervisor(principal) ? principal.operatorId : '';
 };
 const requireAdmin = (req: Parameters<typeof principalFromRequest>[0]) => {
   const principal = principalFromRequest(req);
@@ -128,6 +139,24 @@ const getSale = async (id: string) => {
   const sale = result.rows[0]?.data;
   if (sale) sales.set(sale.id, sale);
   return sale;
+};
+// Serializa operações que mudam o estado de uma venda (cupom, cancelamento, exclusão)
+// e relê a venda do banco dentro da trava, evitando estorno em dobro.
+const withSaleLock = async <T>(id: string, work: (sale: Sale | undefined) => Promise<T>) => {
+  if (!pool) return work(await getSale(id));
+  const client = await pool.connect();
+  let locked = false;
+  try {
+    await client.query('select pg_advisory_lock(hashtext($1))', [id]);
+    locked = true;
+    const result = await client.query('select data from pdv_sales where id = $1', [id]) as { rows: { data: Sale }[] };
+    const sale = result.rows[0]?.data;
+    if (sale) sales.set(sale.id, sale);
+    return await work(sale);
+  } finally {
+    if (locked) await client.query('select pg_advisory_unlock(hashtext($1))', [id]).catch(() => undefined);
+    client.release();
+  }
 };
 app.get('/', async () => ({ ok: true, service: 'pdv-bling-fidelizei-api' }));
 app.get('/health', async (_req, reply) => {
@@ -427,19 +456,7 @@ app.get('/admin/sales/:id', async (req) => {
 
 app.post('/admin/sales/:id/cancel', async (req) => {
   requireAdmin(req);
-  const id = (req.params as {id:string}).id, sale = await getSale(id);
-  if (!sale) return badRequest('Pedido não encontrado');
-  if (sale.status==='CANCELLED') return sale;
-  if (sale.status==='DELETED') return badRequest('Pedido excluído não pode ser cancelado');
-  if (!sale.blingOrderId) return badRequest('Pedido sem vínculo com o Bling');
-  const before = { status:sale.status, total:sale.total, payments:sale.payments };
-  const result = sale.status==='OPEN' ? await bling.cancelDraftOrder(sale.blingOrderId) : await bling.cancelOrder(sale.blingOrderId);
-  let loyaltyWarning: string|undefined;
-  if (sale.fidelizeiTransactionId) try { await fidelizei.reverseSale(sale.id); } catch (error) { loyaltyWarning=error instanceof Error?error.message.slice(0,400):'Estorno Fidelizei pendente'; }
-  if (pool&&['COMPLETED','RECONCILIATION_REQUIRED'].includes(sale.status)) await pool.query(`update bling_products product set stock=product.stock+item.quantity from jsonb_to_recordset($1::jsonb) as item("productId" text,quantity numeric) where product.id=item."productId"`,[JSON.stringify(sale.items.map(item=>({productId:item.productId,quantity:item.quantity})))]);
-  sale.status='CANCELLED'; sale.cancelledAt=new Date().toISOString(); Object.assign(sale,{cancellationKind:'CANCELLED',lastError:loyaltyWarning});
-  await persist(sale); await writeAdminAudit(req,'CANCEL','sale',sale.id,before,{status:sale.status,total:sale.total,operatorId:sale.operatorId});
-  return {...sale,cancelledInBling:true,loyaltyWarning,blingWarnings:result.warnings};
+  return reverseSaleOrder(req, 'CANCEL', 'ADMIN');
 });
 
 app.get('/admin/finance', async (req) => {
@@ -701,6 +718,7 @@ app.post('/cash/entries', async (req) => {
   const database = requireDatabase();
   const session = await cashSessionById(body.sessionId);
   if (!session || session.status !== 'OPEN') return badRequest('Caixa não está aberto');
+  assertOwner(req, session.operatorId, 'Este caixa pertence a outro operador');
   const operationId = body.operationId || randomUUID();
   const existing = await database.query('select id, bling_entry_id as "blingEntryId", data from pdv_cash_operations where id=$1', [operationId]) as { rows: any[] };
   if (existing.rows[0]) return { id: operationId, blingEntryId: existing.rows[0].blingEntryId, idempotent: true, data: existing.rows[0].data };
@@ -736,6 +754,7 @@ app.get('/cash/day', async (req) => {
   const entries = await bling.cashEntries(date, query.accountId);
   if (!query.sessionId) return { date, salesCount: 0, salesTotal: 0, paymentTotals: [], blingEntries: entries, operations: [], expectedCash: 0, pendingSales: 0 };
   const snapshot = await cashSessionSnapshot(query.sessionId);
+  assertOwner(req, snapshot.session.operatorId, 'Este caixa pertence a outro operador');
   return {
     date,
     salesCount: snapshot.salesRows.length,
@@ -822,6 +841,7 @@ app.post('/cash/sessions/:id/close', async (req) => {
   const body = req.body as { countedValues?: { name: string; amount: number }[]; notes?: string };
   const database = requireDatabase();
   const snapshot = await cashSessionSnapshot(id);
+  assertOwner(req, snapshot.session.operatorId, 'Este caixa pertence a outro operador');
   if (snapshot.session.status !== 'OPEN') return badRequest('Caixa já está fechado');
   const expected = new Map(snapshot.paymentTotals.map(item => [item.name, item.amount]));
   const cashName = [...expected.keys()].find(name => /dinheiro|cash/i.test(name)) ?? 'Dinheiro';
@@ -1052,6 +1072,7 @@ app.post('/sales', async (req) => {
 app.put('/sales/:id', async (req) => {
   const sale = await getSale((req.params as { id: string }).id);
   if (!sale) return badRequest('Venda em atendimento não encontrada');
+  assertOwner(req, sale.operatorId, 'Esta venda pertence a outro operador');
   if (sale.status !== 'OPEN') return conflict('Somente vendas em atendimento podem ser atualizadas');
   const body = req.body as { sellerId?: string; categoryId?: string; items?: SaleItem[]; customerCpf?: string; customerSaleId?: string; manualDiscount?: number; freight?: number; observations?: string; emitFiscal?: boolean; payments?: PaymentSplit[]; draftStep?: Sale['draftStep'] };
   if (!body.items?.length) return badRequest('Adicione ao menos um produto');
@@ -1120,15 +1141,17 @@ app.put('/sales/:id', async (req) => {
 });
 app.get('/sales/open', async (req) => {
   const cashSessionId = String((req.query as { cashSessionId?: string }).cashSessionId ?? '');
+  const ownerId = ownSalesFilter(req);
   if (pool) {
-    const result = await pool.query(`select data from pdv_sales where status='OPEN' and ($1='' or data->>'cashSessionId'=$1) order by updated_at desc limit 50`, [cashSessionId]) as { rows: { data: Sale }[] };
+    const result = await pool.query(`select data from pdv_sales where status='OPEN' and ($1='' or data->>'cashSessionId'=$1) and ($2='' or data->>'operatorId'=$2) order by updated_at desc limit 50`, [cashSessionId, ownerId]) as { rows: { data: Sale }[] };
     return result.rows.map(row => row.data);
   }
-  return [...sales.values()].filter(item => item.status === 'OPEN' && (!cashSessionId || item.cashSessionId === cashSessionId));
+  return [...sales.values()].filter(item => item.status === 'OPEN' && (!cashSessionId || item.cashSessionId === cashSessionId) && (!ownerId || item.operatorId === ownerId));
 });
 app.get('/sales/:id', async (req) => {
   const sale = await getSale((req.params as { id: string }).id);
   if (!sale) throw Object.assign(new Error('Venda não encontrada'), { statusCode: 404 });
+  assertOwner(req, sale.operatorId, 'Esta venda pertence a outro operador');
   return sale;
 });
 const couponApplications = new Map<string, { code: string; promise: Promise<Sale> }>();
@@ -1137,6 +1160,7 @@ app.post('/sales/:id/coupon', async (req) => {
   const rawCode = (req.body as { code?: string } | undefined)?.code;
   const code = String(rawCode ?? '').trim().toUpperCase();
   if (!code) return badRequest('Informe o código do cupom Fidelizei');
+  if (sale) assertOwner(req, sale.operatorId, 'Esta venda pertence a outro operador');
   const fidelizeiCustomer = sale?.customer?.fidelizei;
   if (!sale || !fidelizeiCustomer) return badRequest('Cliente não cadastrado no Fidelizei');
   if (sale.status !== 'OPEN') return conflict('Este pedido não está aberto para aplicar cupom');
@@ -1267,6 +1291,7 @@ app.post('/sales/:id/complete', async (req) => {
   const original = await getSale(id);
   const body = req.body as { paymentMethodId?: string; payments?: PaymentSplit[] };
   if (!original) return conflict('Venda não encontrada');
+  assertOwner(req, original.operatorId, 'Esta venda pertence a outro operador');
   if (original.status === 'SYNC_FAILED') {
     if (/Bling não criou o pedido \(HTTP 4\d\d\)/.test(original.lastError ?? '')) {
       original.status = 'OPEN';
@@ -1372,15 +1397,16 @@ app.post('/sales/:id/complete', async (req) => {
 app.get('/sales/recent', async (req) => {
   const rawLimit = Number((req.query as { limit?: string }).limit ?? 10);
   const limit = Math.max(1, Math.min(30, Number.isFinite(rawLimit) ? rawLimit : 10));
+  const ownerId = ownSalesFilter(req);
   if (pool) {
     const result = await pool.query(
-      `select data from pdv_sales where status in ('COMPLETED','RECONCILIATION_REQUIRED') order by updated_at desc limit $1`,
-      [limit]
+      `select data from pdv_sales where status in ('COMPLETED','RECONCILIATION_REQUIRED') and ($2='' or data->>'operatorId'=$2) order by updated_at desc limit $1`,
+      [limit, ownerId]
     ) as { rows: { data: Sale }[] };
     return result.rows.map(row => row.data);
   }
   return [...sales.values()]
-    .filter(item => item.status !== 'OPEN')
+    .filter(item => item.status !== 'OPEN' && (!ownerId || item.operatorId === ownerId))
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
     .slice(0, limit);
 });
@@ -1398,6 +1424,8 @@ app.get('/sales/orders', async (req) => {
     if (query.from) filters.push(`(data->>'createdAt')::timestamptz >= ${add(`${query.from}T00:00:00-03:00`)}::timestamptz`);
     if (query.to) filters.push(`(data->>'createdAt')::timestamptz < (${add(`${query.to}T00:00:00-03:00`)}::timestamptz + interval '1 day')`);
     if (query.status) filters.push(`status = ${add(query.status)}`);
+    const ownerId = ownSalesFilter(req);
+    if (ownerId) filters.push(`data->>'operatorId' = ${add(ownerId)}`);
     if (query.scope === 'active') filters.push(`status not in ('CANCELLED','DELETED')`);
     if (query.scope === 'deleted') filters.push(`(status = 'DELETED' or (status='CANCELLED' and coalesce(data->>'cancellationKind','')=''))`);
     if (query.scope === 'cancelled') filters.push(`status = 'CANCELLED' and data->>'cancellationKind'='CANCELLED'`);
@@ -1427,7 +1455,9 @@ app.get('/sales/orders', async (req) => {
       }
     };
   }
+  const ownerId = ownSalesFilter(req);
   const orders = [...sales.values()].map(normalizeLegacyStatus)
+    .filter(item => !ownerId || item.operatorId === ownerId)
     .filter(item => !query.from || item.createdAt.slice(0, 10) >= query.from)
     .filter(item => !query.to || item.createdAt.slice(0, 10) <= query.to)
     .filter(item => !query.status || item.status === query.status)
@@ -1440,70 +1470,77 @@ app.get('/sales/orders', async (req) => {
   const active = orders.filter(item => !['CANCELLED','DELETED'].includes(item.status));
   return { orders, summary: { count: active.length, total: money(active.reduce((sum, item) => sum + item.total, 0)), cancelled: orders.filter(item => item.status === 'CANCELLED').length, deleted: orders.filter(item => item.status === 'DELETED').length } };
 });
-const deleteSale = async (req: any) => {
-  const id = (req.params as { id: string }).id;
-  const sale = await getSale(id);
-  if (!sale) return badRequest('Pedido não encontrado no PDV');
-  if (sale.status === 'DELETED') return { ...sale, idempotent: true };
-  if (sale.status === 'CANCELLED') return badRequest('Pedido cancelado não pode ser excluído por este fluxo');
-  const deletion = sale.blingOrderId
-    ? sale.status === 'OPEN' ? await bling.deleteDraftOrder(sale.blingOrderId) : await bling.deleteOrder(sale.blingOrderId)
-    : { deleted: false, warnings: [] as string[] };
-  let loyaltyWarning: string | undefined;
-  if (sale.fidelizeiTransactionId) {
-    try { await fidelizei.reverseSale(sale.id); }
-    catch (error) { loyaltyWarning = error instanceof Error ? error.message.slice(0, 400) : 'Estorno Fidelizei pendente'; }
+const reverseLoyalty = async (sale: Sale) => {
+  // Devolve cupom e pontos da venda no Fidelizei. Uma falha não impede o
+  // cancelamento no Bling: fica registrada no pedido para conferência.
+  if (!sale.coupon && !sale.fidelizeiTransactionId) return undefined;
+  try {
+    await fidelizei.reverseSale(sale.id);
+    return undefined;
+  } catch (error) {
+    return error instanceof Error ? error.message.slice(0, 400) : 'Estorno Fidelizei pendente';
   }
-  if (pool && ['COMPLETED', 'RECONCILIATION_REQUIRED'].includes(sale.status)) {
-    await pool.query(
-      `update bling_products product set stock=product.stock+item.quantity
-       from jsonb_to_recordset($1::jsonb) as item("productId" text, quantity numeric)
-       where product.id=item."productId"`,
-      [JSON.stringify(sale.items.map(item => ({ productId: item.productId, quantity: item.quantity })))]
-    );
-  }
-  sale.status = 'DELETED';
-  Object.assign(sale, { deletedAt: new Date().toISOString(), deletionKind: 'DELETED' });
-  sale.lastError = [loyaltyWarning, ...(deletion.warnings ?? [])].filter(Boolean).join(' · ') || undefined;
-  await persist(sale);
-  return { ...sale, deletedInBling: Boolean(sale.blingOrderId), loyaltyWarning, blingWarnings: deletion.warnings };
 };
+const restoreLocalStock = async (sale: Sale) => {
+  if (!pool || !['COMPLETED', 'RECONCILIATION_REQUIRED'].includes(sale.status)) return;
+  await pool.query(
+    `update bling_products product set stock=product.stock+item.quantity
+     from jsonb_to_recordset($1::jsonb) as item("productId" text, quantity numeric)
+     where product.id=item."productId"`,
+    [JSON.stringify(sale.items.map(item => ({ productId: item.productId, quantity: item.quantity })))]
+  );
+};
+const reverseSaleOrder = (req: any, kind: 'CANCEL' | 'DELETE', source: 'PDV' | 'ADMIN') =>
+  withSaleLock((req.params as { id: string }).id, async sale => {
+    if (!sale) return badRequest('Pedido não encontrado no PDV');
+    assertOwner(req, sale.operatorId, 'Este pedido pertence a outro operador');
+    if (kind === 'DELETE') {
+      if (sale.status === 'DELETED') return { ...sale, idempotent: true };
+      if (sale.status === 'CANCELLED') return badRequest('Pedido cancelado não pode ser excluído por este fluxo');
+    } else {
+      if (sale.status === 'CANCELLED') return { ...sale, idempotent: true };
+      if (sale.status === 'DELETED') return badRequest('Pedido excluído não pode ser cancelado');
+      if (!sale.blingOrderId) return badRequest('Pedido ainda não foi criado no Bling');
+    }
+    if (sale.status === 'PROCESSING') return conflict('A venda está sendo finalizada. Aguarde a conclusão antes de cancelar ou excluir');
+    if (reversalRequiresSupervisor(sale.status)) requireManager(req);
+    const before = { status: sale.status, total: sale.total, payments: sale.payments, coupon: sale.coupon };
+    const blingResult = kind === 'DELETE'
+      ? sale.blingOrderId
+        ? sale.status === 'OPEN' ? await bling.deleteDraftOrder(sale.blingOrderId) : await bling.deleteOrder(sale.blingOrderId)
+        : { warnings: [] as string[] }
+      : sale.status === 'OPEN' ? await bling.cancelDraftOrder(sale.blingOrderId!) : await bling.cancelOrder(sale.blingOrderId!);
+    const loyaltyWarning = await reverseLoyalty(sale);
+    await restoreLocalStock(sale);
+    const warnings = [loyaltyWarning, ...(blingResult.warnings ?? [])].filter(Boolean).join(' · ') || undefined;
+    if (kind === 'DELETE') {
+      sale.status = 'DELETED';
+      Object.assign(sale, { deletedAt: new Date().toISOString(), deletionKind: 'DELETED' });
+    } else {
+      sale.status = 'CANCELLED';
+      sale.cancelledAt = new Date().toISOString();
+      Object.assign(sale, { cancellationKind: 'CANCELLED' });
+    }
+    sale.lastError = warnings;
+    await persist(sale);
+    await writeAdminAudit(req, kind, 'sale', sale.id, before, { status: sale.status, total: sale.total, operatorId: sale.operatorId, source, warnings });
+    return kind === 'DELETE'
+      ? { ...sale, deletedInBling: Boolean(sale.blingOrderId), loyaltyWarning, blingWarnings: blingResult.warnings }
+      : { ...sale, cancelledInBling: true, loyaltyWarning, blingWarnings: blingResult.warnings };
+  });
+const deleteSale = (req: any) => reverseSaleOrder(req, 'DELETE', 'PDV');
 app.delete('/sales/:id', deleteSale);
 // Alguns navegadores, proxies e redes corporativas bloqueiam DELETE. A ação POST
 // preserva a mesma semântica e torna a exclusão operacional no caixa.
 app.post('/sales/:id/delete', deleteSale);
-app.post('/sales/:id/cancel', async (req) => {
-  const id = (req.params as { id: string }).id;
-  const sale = await getSale(id);
-  if (!sale) return badRequest('Pedido não encontrado no PDV');
-  if (sale.status === 'CANCELLED') return { ...sale, idempotent: true };
-  if (sale.status === 'DELETED') return badRequest('Pedido excluído não pode ser cancelado');
-  if (!sale.blingOrderId) return badRequest('Pedido ainda não foi criado no Bling');
-  const cancellation = sale.status === 'OPEN' ? await bling.cancelDraftOrder(sale.blingOrderId) : await bling.cancelOrder(sale.blingOrderId);
-  let loyaltyWarning: string | undefined;
-  if (sale.fidelizeiTransactionId) {
-    try { await fidelizei.reverseSale(sale.id); }
-    catch (error) { loyaltyWarning = error instanceof Error ? error.message.slice(0, 400) : 'Estorno Fidelizei pendente'; }
-  }
-  if (pool && ['COMPLETED', 'RECONCILIATION_REQUIRED'].includes(sale.status)) {
-    await pool.query(
-      `update bling_products product set stock=product.stock+item.quantity
-       from jsonb_to_recordset($1::jsonb) as item("productId" text, quantity numeric)
-       where product.id=item."productId"`,
-      [JSON.stringify(sale.items.map(item => ({ productId: item.productId, quantity: item.quantity })))]
-    );
-  }
-  sale.status = 'CANCELLED';
-  sale.cancelledAt = new Date().toISOString();
-  Object.assign(sale, { cancellationKind: 'CANCELLED', lastError: [loyaltyWarning, ...(cancellation.warnings ?? [])].filter(Boolean).join(' · ') || undefined });
-  await persist(sale);
-  return { ...sale, cancelledInBling: true, loyaltyWarning, blingWarnings: cancellation.warnings };
-});
+app.post('/sales/:id/cancel', async (req) => reverseSaleOrder(req, 'CANCEL', 'PDV'));
 app.post('/sales/:id/reverse-fidelizei', async (req) => {
   requireManager(req);
   const sale = await getSale((req.params as { id: string }).id);
-  if (!sale?.fidelizeiTransactionId) return badRequest('Venda sem transação Fidelizei para estorno');
-  return fidelizei.reverseSale(sale.id);
+  if (!sale || (!sale.fidelizeiTransactionId && !sale.coupon)) return badRequest('Venda sem cupom ou transação Fidelizei para estorno');
+  const result = await fidelizei.reverseSale(sale.id);
+  await writeAdminAudit(req, 'FIDELIZEI_REVERSE', 'sale', sale.id, null, { result });
+  return result;
 });
 const shutdown = async (signal: string) => {
   app.log.info({ signal }, 'Encerrando o PDV com segurança');

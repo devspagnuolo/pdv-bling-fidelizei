@@ -792,6 +792,8 @@ export const fidelizei = {
   },
   reverseSale: async (externalSaleId: string) => {
     const response = await fidelizeiFetch(`/sales/${encodeURIComponent(externalSaleId)}/reverse`, { method: 'POST' });
+    // 404: o Fidelizei não tem pontos nem cupom registrados para esta venda.
+    if (response.status === 404) return { reversed: false, reason: 'NOT_FOUND' };
     if (!response.ok) return fidelizeiError(response, 'estorno da venda');
     return unwrap(await response.json());
   }
