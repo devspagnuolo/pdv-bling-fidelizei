@@ -76,8 +76,8 @@ const processEvent = async (payload: BlingWebhook) => {
   // ao pedido depende dos detalhes da nota e será feita pelo reconciliador fiscal.
 };
 
-const processNextEvent = async (app: FastifyInstance) => {
-  if (!pool) return;
+const processNextEvent = async (app: FastifyInstance): Promise<boolean> => {
+  if (!pool) return false;
   const claimed = await pool.query(
     `with candidate as (
        select event_id from bling_webhook_events
@@ -89,7 +89,7 @@ const processNextEvent = async (app: FastifyInstance) => {
      returning event.event_id as "eventId", event.payload, event.attempts`
   ) as { rows: { eventId: string; payload: BlingWebhook; attempts: number }[] };
   const item = claimed.rows[0];
-  if (!item) return;
+  if (!item) return false;
   try {
     await processEvent(item.payload);
     await pool.query(
@@ -106,6 +106,23 @@ const processNextEvent = async (app: FastifyInstance) => {
       [item.eventId, status, message.slice(0, 1000), String(delaySeconds)]
     );
     app.log.error({ error, eventId: item.eventId, attempts: item.attempts, status }, 'Falha ao processar webhook do Bling');
+  }
+  return true;
+};
+
+// Esvazia a fila em lotes, em ordem de chegada. Antes era 1 evento a cada 2 s, o que
+// atrasava preço e estoque por vários minutos após alterações em massa no Bling.
+const WEBHOOK_BATCH_SIZE = 50;
+let draining = false;
+const drainEvents = async (app: FastifyInstance) => {
+  if (draining) return;
+  draining = true;
+  try {
+    for (let processed = 0; processed < WEBHOOK_BATCH_SIZE; processed += 1) {
+      if (!await processNextEvent(app)) break;
+    }
+  } finally {
+    draining = false;
   }
 };
 
@@ -137,7 +154,7 @@ export const registerBlingWebhooks = (app: FastifyInstance) => {
     return { accepted: true, idempotent: !inserted.rowCount };
   });
   const timer = setInterval(() => {
-    void processNextEvent(app).catch(error => app.log.error({ error }, 'Falha no worker de webhooks do Bling'));
+    void drainEvents(app).catch(error => app.log.error({ error }, 'Falha no worker de webhooks do Bling'));
   }, 2_000);
   timer.unref();
   app.addHook('onClose', async () => clearInterval(timer));

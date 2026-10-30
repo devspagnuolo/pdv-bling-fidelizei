@@ -169,6 +169,8 @@ export const initializeDatabase = async () => {
   await pool.query(`create index if not exists bling_webhook_events_pending_idx
     on bling_webhook_events (status, next_attempt_at, received_at)
     where status in ('PENDING','PROCESSING','FAILED','DEAD')`);
+  // Um evento em PROCESSING na partida ficou preso por reinício no meio do processamento.
+  await pool.query("update bling_webhook_events set status='FAILED', next_attempt_at=now() where status='PROCESSING'");
   await pool.query(`create table if not exists pdv_operator_credentials (
     operator_id text primary key,
     pin_hash text not null,

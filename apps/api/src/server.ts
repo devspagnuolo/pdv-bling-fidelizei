@@ -106,6 +106,13 @@ const requireAdminViewer = (req: Parameters<typeof principalFromRequest>[0]) => 
   return principal;
 };
 const sales = new Map<string, Sale>();
+// Cache limitado às vendas mais recentes; o banco continua sendo a fonte de verdade.
+const SALES_CACHE_LIMIT = 500;
+const cacheSale = (sale: Sale) => {
+  sales.delete(sale.id);
+  sales.set(sale.id, sale);
+  if (pool && sales.size > SALES_CACHE_LIMIT) sales.delete(sales.keys().next().value!);
+};
 const badRequest = (message: string): never => { throw Object.assign(new Error(message), { statusCode: 400 }); };
 const conflict = (message: string): never => { throw Object.assign(new Error(message), { statusCode: 409 }); };
 const calculate = (items: SaleItem[], discount = 0, freight = 0) => {
@@ -142,7 +149,7 @@ registerBlingWebhooks(app);
 void bling.syncProducts().catch(error => app.log.error(error, 'Falha na sincronização inicial do catálogo Bling'));
 setInterval(() => void bling.syncProducts().catch(error => app.log.error(error, 'Falha na sincronização periódica do catálogo Bling')), 15 * 60_000).unref();
 const persist = async (sale: Sale) => {
-  sales.set(sale.id, sale);
+  cacheSale(sale);
   if (pool) await pool.query(
     `insert into pdv_sales (id, status, data) values ($1, $2, $3::jsonb)
      on conflict (id) do update set status = excluded.status, data = excluded.data, updated_at = now()`,
@@ -155,7 +162,7 @@ const getSale = async (id: string) => {
   if (!pool) return undefined;
   const result = await pool.query('select data from pdv_sales where id = $1', [id]) as { rows: { data: Sale }[] };
   const sale = result.rows[0]?.data;
-  if (sale) sales.set(sale.id, sale);
+  if (sale) cacheSale(sale);
   return sale;
 };
 // Serializa operações que mudam o estado de uma venda (cupom, cancelamento, exclusão)
@@ -169,7 +176,7 @@ const withSaleLock = async <T>(id: string, work: (sale: Sale | undefined) => Pro
     locked = true;
     const result = await client.query('select data from pdv_sales where id = $1', [id]) as { rows: { data: Sale }[] };
     const sale = result.rows[0]?.data;
-    if (sale) sales.set(sale.id, sale);
+    if (sale) cacheSale(sale);
     return await work(sale);
   } finally {
     if (locked) await client.query('select pg_advisory_unlock(hashtext($1))', [id]).catch(() => undefined);
@@ -1160,13 +1167,21 @@ app.post('/sales', async (req) => {
   };
   sale.blingDraftStatusId = await bling.findInServiceStatusId();
   const order = await bling.createOrder(blingOrderInput(sale, session, []));
-  const createdContact = await bling.getOrderContact(order.id);
-  if (sale.customer?.bling?.id && createdContact.id !== sale.customer.bling.id) {
-    throw new Error('Bling criou o pedido com um contato diferente do cliente confirmado; a venda não será vinculada no PDV');
+  try {
+    const createdContact = await bling.getOrderContact(order.id);
+    if (sale.customer?.bling?.id && createdContact.id !== sale.customer.bling.id) {
+      throw new Error('Bling criou o pedido com um contato diferente do cliente confirmado; a venda não será vinculada no PDV');
+    }
+    sale.blingOrderId = order.id;
+    sale.blingOrderNumber = order.number;
+    await persist(sale);
+  } catch (error) {
+    // Sem a venda no PDV, o rascunho ficaria órfão "Em atendimento" no Bling.
+    sales.delete(sale.id);
+    await bling.deleteDraftOrder(order.id).catch(cleanupError =>
+      app.log.error({ err: cleanupError, blingOrderId: order.id, saleId: sale.id }, 'Rascunho criado no Bling sem venda no PDV; excluir manualmente'));
+    throw error;
   }
-  sale.blingOrderId = order.id;
-  sale.blingOrderNumber = order.number;
-  await persist(sale);
   return sale;
 });
 app.put('/sales/:id', async (req) => {
@@ -1284,7 +1299,7 @@ app.post('/sales/:id/coupon', async (req) => {
         const refreshed = await databaseClient.query('select data from pdv_sales where id = $1', [sale.id]) as { rows: { data: Sale }[] };
         if (refreshed.rows[0]) {
           sale = refreshed.rows[0].data;
-          sales.set(sale.id, sale);
+          cacheSale(sale);
         }
       }
 
@@ -1378,7 +1393,7 @@ const claimSaleForCompletion = async (id: string, fallback: Sale) => {
     ) as { rows: { data: Sale }[] };
     if (!result.rows[0]) return conflict('Venda já está sendo processada ou foi concluída');
     const claimed = result.rows[0].data;
-    sales.set(id, claimed);
+    cacheSale(claimed);
     return claimed;
   }
   if (processingSales.has(id) || fallback.status !== 'OPEN') return conflict('Venda já está sendo processada ou foi concluída');
